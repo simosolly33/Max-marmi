@@ -5,7 +5,7 @@ Avvia con: python marmi_app.py
 Poi apri: http://localhost:7860
 """
 
-import os, sqlite3, json, re, hashlib, secrets, datetime
+import os, sqlite3, json, re, hashlib, secrets, datetime, threading
 from pathlib import Path
 from functools import wraps
 from flask import (Flask, request, jsonify, session,
@@ -1022,38 +1022,77 @@ def admin():
 @admin_required
 def admin_stats():
     conn = get_app_db()
-    # Messaggi totali
-    total_msgs   = conn.execute("SELECT COUNT(*) c FROM messages").fetchone()["c"]
-    total_convs  = conn.execute("SELECT COUNT(*) c FROM conversations").fetchone()["c"]
-    total_users  = conn.execute("SELECT COUNT(*) c FROM users").fetchone()["c"]
-    # Messaggi ultimi 7 giorni per giorno
-    days7 = conn.execute("""
+
+    total_msgs  = conn.execute("SELECT COUNT(*) c FROM messages WHERE role='user'").fetchone()["c"]
+    total_convs = conn.execute("SELECT COUNT(*) c FROM conversations").fetchone()["c"]
+    total_users = conn.execute("SELECT COUNT(*) c FROM users").fetchone()["c"]
+
+    msgs_today = conn.execute("""
+        SELECT COUNT(*) c FROM messages
+        WHERE role='user' AND date(created_at)=date('now')
+    """).fetchone()["c"]
+
+    active_week = conn.execute("""
+        SELECT COUNT(DISTINCT c.user_id) c FROM conversations c
+        JOIN messages m ON m.conversation_id=c.id
+        WHERE m.role='user' AND m.created_at >= datetime('now','-7 days')
+    """).fetchone()["c"]
+
+    avg_msgs = conn.execute("""
+        SELECT ROUND(AVG(cnt),1) v FROM
+        (SELECT COUNT(*) cnt FROM messages WHERE role='user' GROUP BY conversation_id)
+    """).fetchone()["v"] or 0
+
+    # Ultimi 14 giorni
+    days14 = conn.execute("""
         SELECT date(created_at) day, COUNT(*) msgs
-        FROM messages WHERE created_at >= datetime('now','-7 days')
+        FROM messages WHERE role='user' AND created_at >= datetime('now','-14 days')
         GROUP BY day ORDER BY day
     """).fetchall()
-    # Messaggi per utente
+
+    # Per-user con health info
     per_user = conn.execute("""
-        SELECT u.display_name, u.role, COUNT(m.id) msgs,
-               MAX(m.created_at) last_active
+        SELECT u.id, u.display_name, u.username, u.role,
+               COALESCE(SUM(CASE WHEN m.role='user' THEN 1 ELSE 0 END),0) user_msgs,
+               COUNT(DISTINCT c.id) convs,
+               MAX(m.created_at) last_active,
+               COALESCE(SUM(CASE WHEN m.role='user'
+                   AND m.created_at >= datetime('now','-7 days') THEN 1 ELSE 0 END),0) msgs_7d
         FROM users u
         LEFT JOIN conversations c ON c.user_id=u.id
         LEFT JOIN messages m ON m.conversation_id=c.id
-        GROUP BY u.id ORDER BY msgs DESC
+        GROUP BY u.id
+        ORDER BY last_active DESC
     """).fetchall()
-    # Top query (primi 100 messaggi utente)
-    top_q = conn.execute("""
-        SELECT content, COUNT(*) n FROM messages
-        WHERE role='user' GROUP BY content ORDER BY n DESC LIMIT 10
+
+    # Attività recente (ultime 15 domande utente)
+    recent = conn.execute("""
+        SELECT u.display_name, m.content, m.created_at
+        FROM messages m
+        JOIN conversations c ON c.id=m.conversation_id
+        JOIN users u ON u.id=c.user_id
+        WHERE m.role='user'
+        ORDER BY m.created_at DESC LIMIT 15
     """).fetchall()
+
+    # Messaggi utente per classificazione ambiti
+    all_msgs = conn.execute("""
+        SELECT content FROM messages WHERE role='user'
+        ORDER BY created_at DESC LIMIT 500
+    """).fetchall()
+
     conn.close()
     return jsonify(
         total_messages=total_msgs,
         total_conversations=total_convs,
         total_users=total_users,
-        messages_per_day=[dict(r) for r in days7],
+        msgs_today=msgs_today,
+        active_week=active_week,
+        avg_msgs=float(avg_msgs),
+        messages_per_day=[dict(r) for r in days14],
         per_user=[dict(r) for r in per_user],
-        top_queries=[dict(r) for r in top_q]
+        recent_activity=[dict(r) for r in recent],
+        all_messages=[r['content'] for r in all_msgs]
     )
 
 @app.route("/api/admin/conversations")
@@ -1534,125 +1573,414 @@ document.getElementById('inp').addEventListener('focus', function(){
 ADMIN_HTML = """<!DOCTYPE html>
 <html lang="it">
 <head>
-<meta charset="UTF-8"><title>Admin — Max Marmi</title>
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta charset="UTF-8"><title>CS Dashboard — Max Marmi</title>
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f9fafb;color:#111827;min-height:100vh}
-nav{background:#fff;border-bottom:1px solid #e5e7eb;padding:0 28px;display:flex;align-items:center;gap:8px;height:56px}
-.nav-brand{font-size:.82rem;font-weight:700;color:#1d1d1f;letter-spacing:.07em;text-transform:uppercase;margin-right:12px}
-.nav-a{font-size:.83rem;color:#6b7280;text-decoration:none;padding:6px 12px;border-radius:7px;transition:all .15s}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f5f5f7;color:#1d1d1f;min-height:100vh}
+
+/* ── NAV ── */
+nav{background:#fff;border-bottom:1px solid #e5e7eb;padding:0 22px;display:flex;align-items:center;gap:6px;height:52px;position:sticky;top:0;z-index:50}
+.nav-brand{font-size:.78rem;font-weight:700;color:#1d1d1f;letter-spacing:.07em;text-transform:uppercase;margin-right:14px;white-space:nowrap}
+.nav-a{font-size:.8rem;color:#6b7280;text-decoration:none;padding:5px 10px;border-radius:7px;transition:all .15s;white-space:nowrap}
 .nav-a:hover,.nav-a.on{background:#f3f4f6;color:#1d1d1f}
-.nav-ml{margin-left:auto}
-.container{max-width:1080px;margin:0 auto;padding:36px 28px}
-.page-title{font-size:1.4rem;font-weight:700;letter-spacing:-.02em;margin-bottom:4px}
-.page-sub{font-size:.85rem;color:#6b7280;margin-bottom:32px}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:14px;margin-bottom:28px}
-.card{background:#fff;border:1px solid #e5e7eb;border-radius:12px;padding:22px}
-.card-label{font-size:.72rem;font-weight:600;color:#9ca3af;text-transform:uppercase;letter-spacing:.07em;margin-bottom:10px}
-.card-value{font-size:1.9rem;font-weight:700;color:#1d1d1f;letter-spacing:-.03em}
-.card-sub{font-size:.78rem;color:#9ca3af;margin-top:4px}
-.section{background:#fff;border:1px solid #e5e7eb;border-radius:12px;padding:24px;margin-bottom:20px}
-.section-title{font-size:.9rem;font-weight:700;margin-bottom:18px;color:#1d1d1f}
-table{width:100%;border-collapse:collapse;font-size:.83rem}
-th{text-align:left;padding:9px 14px;font-size:.72rem;font-weight:600;color:#9ca3af;text-transform:uppercase;letter-spacing:.06em;border-bottom:1px solid #f3f4f6}
-td{padding:10px 14px;border-bottom:1px solid #f9fafb;color:#3a3a3c}
-tr:last-child td{border:none}
-tr:hover td{background:#f9fafb}
-.badge{display:inline-block;padding:2px 8px;border-radius:20px;font-size:.7rem;font-weight:600;letter-spacing:.03em}
-.badge.admin{background:#1d1d1f;color:#fff}
-.badge.user{background:#f3f4f6;color:#6b7280}
-.btn-sm{background:#1d1d1f;color:#fff;border:none;border-radius:6px;padding:5px 12px;font-size:.75rem;cursor:pointer;font-weight:500}
-.btn-sm:hover{background:#3a3a3c}
-.bars{display:flex;align-items:flex-end;gap:5px;height:72px;margin:4px 0 8px}
-.bar{flex:1;background:#1d1d1f;border-radius:3px 3px 0 0;min-height:2px;position:relative}
-.bar:hover::after{content:attr(data-tip);position:absolute;bottom:calc(100%+6px);left:50%;transform:translateX(-50%);background:#1d1d1f;color:#fff;padding:3px 8px;border-radius:5px;font-size:.7rem;white-space:nowrap;z-index:10}
-.bar-lbs{display:flex;gap:5px}
-.bar-lb{flex:1;font-size:.65rem;color:#9ca3af;text-align:center;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.panel{position:fixed;top:0;right:-480px;width:460px;height:100vh;background:#fff;border-left:1px solid #e5e7eb;z-index:100;display:flex;flex-direction:column;transition:right .25s ease}
-.panel.open{right:0}
-.panel-head{padding:20px 22px;border-bottom:1px solid #e5e7eb;display:flex;align-items:flex-start;gap:12px}
-.panel-title{font-size:.95rem;font-weight:700;flex:1}
-.panel-sub{font-size:.78rem;color:#9ca3af;margin-top:2px}
-.panel-msgs{flex:1;overflow-y:auto;padding:20px 22px;display:flex;flex-direction:column;gap:14px}
-.pmsg{}
-.pmsg-meta{font-size:.7rem;color:#9ca3af;margin-bottom:4px}
-.pmsg-text{background:#f9fafb;border:1px solid #f3f4f6;border-radius:8px;padding:10px 14px;font-size:.83rem;line-height:1.55;color:#3a3a3c}
-.pmsg.user .pmsg-text{background:#111;color:#fff;border-color:#1d1d1f}
-.overlay{position:fixed;inset:0;background:rgba(0,0,0,.25);z-index:99;display:none}
+.nav-ml{margin-left:auto;display:flex;align-items:center;gap:8px}
+.live-badge{display:flex;align-items:center;gap:5px;font-size:.72rem;color:#6b7280;background:#f9fafb;border:1px solid #e5e7eb;padding:3px 10px;border-radius:20px}
+.live-dot{width:6px;height:6px;border-radius:50%;background:#10b981;animation:blink 2s infinite;flex-shrink:0}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:.25}}
+
+/* ── LAYOUT ── */
+.wrap{max-width:1120px;margin:0 auto;padding:24px 22px}
+.page-hd{margin-bottom:24px}
+.page-title{font-size:1.3rem;font-weight:700;letter-spacing:-.02em}
+.page-sub{font-size:.82rem;color:#6b7280;margin-top:3px}
+
+/* ── KPI CARDS ── */
+.kpi-row{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:18px}
+.kpi{background:#fff;border:1px solid #e5e7eb;border-radius:12px;padding:18px 18px 16px;position:relative;overflow:hidden}
+.kpi::after{content:'';position:absolute;top:0;left:0;width:3px;height:100%}
+.kpi.blue::after{background:#3b82f6}
+.kpi.green::after{background:#10b981}
+.kpi.purple::after{background:#8b5cf6}
+.kpi.amber::after{background:#f59e0b}
+.kpi-lbl{font-size:.68rem;font-weight:600;color:#9ca3af;text-transform:uppercase;letter-spacing:.07em;margin-bottom:8px}
+.kpi-val{font-size:1.9rem;font-weight:700;letter-spacing:-.03em;line-height:1;color:#1d1d1f}
+.kpi-sub{font-size:.72rem;color:#9ca3af;margin-top:5px}
+
+/* ── SECTION CARDS ── */
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px}
+.grid1{margin-bottom:14px}
+.sec{background:#fff;border:1px solid #e5e7eb;border-radius:12px;padding:20px}
+.sec-hd{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px}
+.sec-title{font-size:.86rem;font-weight:700;color:#1d1d1f}
+.sec-meta{font-size:.7rem;color:#9ca3af}
+
+/* ── CHART ── */
+.chart-bars{display:flex;align-items:flex-end;gap:3px;height:72px;margin-bottom:6px}
+.cb-col{flex:1;display:flex;flex-direction:column;align-items:center;gap:2px;cursor:default}
+.cb-fill{width:100%;border-radius:3px 3px 0 0;min-height:2px;background:#d1d5db;transition:background .2s}
+.cb-fill.today{background:#3b82f6}
+.cb-fill.has-data{background:#1d1d1f}
+.cb-fill:hover{opacity:.75}
+.cb-lbl{font-size:.58rem;color:#9ca3af;text-align:center;overflow:hidden;white-space:nowrap;max-width:100%}
+
+/* ── USER HEALTH TABLE ── */
+.utab{width:100%;border-collapse:collapse;font-size:.81rem}
+.utab th{text-align:left;padding:7px 10px;font-size:.66rem;font-weight:600;color:#9ca3af;text-transform:uppercase;letter-spacing:.06em;border-bottom:1px solid #f3f4f6}
+.utab td{padding:9px 10px;border-bottom:1px solid #f9fafb;vertical-align:middle}
+.utab tr:last-child td{border:none}
+.utab tr:hover td{background:#f9fafb}
+.uname{font-weight:600;color:#1d1d1f;font-size:.82rem}
+.usub{font-size:.68rem;color:#9ca3af;margin-top:1px}
+
+/* health pills */
+.hp{display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:20px;font-size:.68rem;font-weight:600;white-space:nowrap}
+.hp::before{content:'';width:5px;height:5px;border-radius:50%;flex-shrink:0}
+.hp.oggi{background:#d1fae5;color:#065f46}.hp.oggi::before{background:#10b981}
+.hp.sett{background:#fef3c7;color:#92400e}.hp.sett::before{background:#f59e0b}
+.hp.mese{background:#ffedd5;color:#9a3412}.hp.mese::before{background:#f97316}
+.hp.fermo{background:#fee2e2;color:#991b1b}.hp.fermo::before{background:#ef4444}
+.hp.mai{background:#f3f4f6;color:#9ca3af}.hp.mai::before{background:#d1d5db}
+
+/* role badge */
+.rb{display:inline-block;padding:2px 7px;border-radius:20px;font-size:.65rem;font-weight:600}
+.rb.admin{background:#1d1d1f;color:#fff}.rb.user{background:#f3f4f6;color:#6b7280}
+
+/* msgs badge */
+.nb{font-size:.78rem;font-weight:700;color:#1d1d1f;min-width:24px;text-align:center}
+.nb-sub{font-size:.65rem;color:#9ca3af;font-weight:400}
+
+/* ── ACTIVITY FEED ── */
+.feed{display:flex;flex-direction:column;gap:8px;max-height:260px;overflow-y:auto;padding-right:2px}
+.fi{display:flex;gap:9px;align-items:flex-start}
+.fi-av{width:26px;height:26px;border-radius:50%;background:#1d1d1f;color:#fff;display:flex;align-items:center;justify-content:center;font-size:.7rem;font-weight:700;flex-shrink:0;margin-top:1px}
+.fi-body{flex:1;min-width:0}
+.fi-meta{font-size:.67rem;color:#9ca3af;margin-bottom:2px}
+.fi-text{font-size:.78rem;color:#3a3a3c;background:#f9fafb;border:1px solid #f3f4f6;border-radius:8px;padding:5px 10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+/* ── TOP QUESTIONS ── */
+.qlist{display:flex;flex-direction:column;gap:10px}
+.qi{display:flex;align-items:center;gap:8px}
+.qi-text{font-size:.78rem;color:#3a3a3c;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.qi-bar-bg{width:64px;background:#f3f4f6;border-radius:4px;height:5px;flex-shrink:0}
+.qi-bar{height:5px;border-radius:4px;background:#1d1d1f}
+.qi-n{font-size:.72rem;font-weight:700;color:#9ca3af;min-width:20px;text-align:right;flex-shrink:0}
+
+/* ── CONV PANEL (slide-in) ── */
+.overlay{position:fixed;inset:0;background:rgba(0,0,0,.2);z-index:99;display:none}
 .overlay.open{display:block}
+.panel{position:fixed;top:0;right:-500px;width:460px;height:100vh;background:#fff;border-left:1px solid #e5e7eb;z-index:100;display:flex;flex-direction:column;transition:right .25s ease}
+.panel.open{right:0}
+.panel-hd{padding:18px 20px;border-bottom:1px solid #e5e7eb;display:flex;align-items:flex-start;gap:10px}
+.panel-title{font-size:.9rem;font-weight:700;flex:1}
+.panel-sub{font-size:.74rem;color:#9ca3af;margin-top:2px}
+.panel-close{background:none;border:none;cursor:pointer;color:#9ca3af;font-size:1rem;line-height:1;padding:2px}
+.panel-msgs{flex:1;overflow-y:auto;padding:16px 20px;display:flex;flex-direction:column;gap:12px}
+.pmsg-meta{font-size:.67rem;color:#9ca3af;margin-bottom:3px}
+.pmsg-text{border-radius:8px;padding:9px 12px;font-size:.8rem;line-height:1.55}
+.pmsg.user .pmsg-text{background:#1d1d1f;color:#fff}
+.pmsg.assistant .pmsg-text{background:#f9fafb;border:1px solid #f3f4f6;color:#3a3a3c}
+
+/* ── CONV TABLE (all conversations) ── */
+.cvtab{width:100%;border-collapse:collapse;font-size:.8rem}
+.cvtab th{text-align:left;padding:7px 10px;font-size:.66rem;font-weight:600;color:#9ca3af;text-transform:uppercase;letter-spacing:.06em;border-bottom:1px solid #f3f4f6}
+.cvtab td{padding:9px 10px;border-bottom:1px solid #f9fafb;color:#3a3a3c;vertical-align:middle}
+.cvtab tr:last-child td{border:none}
+.cvtab tr:hover td{background:#f9fafb}
+.btn-sm{background:#f3f4f6;color:#1d1d1f;border:none;border-radius:6px;padding:4px 11px;font-size:.72rem;cursor:pointer;font-weight:500;transition:background .15s}
+.btn-sm:hover{background:#e5e7eb}
+
+/* ── MOBILE ── */
+@media(max-width:680px){
+  .wrap{padding:14px 12px}
+  .kpi-row{grid-template-columns:1fr 1fr;gap:10px}
+  .kpi-val{font-size:1.55rem}
+  .kpi{padding:14px 13px 12px}
+  .grid2{grid-template-columns:1fr;gap:12px}
+  nav{padding:0 14px}
+  .nav-a{display:none}.nav-a.on,.nav-a.always{display:inline}
+  .utab th:nth-child(4),.utab td:nth-child(4){display:none}
+  .panel{width:100%;right:-110%}.panel.open{right:0}
+  .cvtab th:nth-child(3),.cvtab td:nth-child(3),
+  .cvtab th:nth-child(4),.cvtab td:nth-child(4){display:none}
+}
 </style>
 </head>
 <body>
+
 <nav>
-  <span class="nav-brand">Max Marmi — Admin</span>
+  <span class="nav-brand">Max Marmi</span>
   <a class="nav-a" href="/">Chat</a>
   <a class="nav-a on" href="/admin">Dashboard</a>
-  <a class="nav-a nav-ml" href="/logout">Esci</a>
+  <div class="nav-ml">
+    <div class="live-badge"><span class="live-dot"></span><span id="upd-lbl">—</span></div>
+    <a class="nav-a always" href="/logout" style="color:#9ca3af">Esci</a>
+  </div>
 </nav>
-<div class="container">
-  <div class="page-title">Dashboard</div>
-  <div class="page-sub" id="pg-sub">Caricamento...</div>
-  <div class="grid" id="cards"></div>
-  <div class="section">
-    <div class="section-title">Messaggi — ultimi 7 giorni</div>
-    <div id="chart"></div>
+
+<div class="wrap">
+  <div class="page-hd">
+    <div class="page-title">Customer Success</div>
+    <div class="page-sub" id="pg-sub">Caricamento...</div>
   </div>
-  <div class="section">
-    <div class="section-title">Attività per utente</div>
-    <table><thead><tr><th>Utente</th><th>Ruolo</th><th>Messaggi</th><th>Ultima attività</th></tr></thead><tbody id="utb"></tbody></table>
+
+  <!-- KPI -->
+  <div class="kpi-row" id="kpis"></div>
+
+  <!-- Chart + User Health -->
+  <div class="grid2">
+    <div class="sec">
+      <div class="sec-hd">
+        <div class="sec-title">Messaggi giornalieri</div>
+        <div class="sec-meta">ultimi 14 giorni</div>
+      </div>
+      <div class="chart-bars" id="chart"></div>
+    </div>
+    <div class="sec">
+      <div class="sec-hd">
+        <div class="sec-title">Salute utenti</div>
+        <div class="sec-meta" id="health-meta"></div>
+      </div>
+      <table class="utab">
+        <thead><tr><th>Utente</th><th>Stato</th><th>7 gg</th><th>Tot</th></tr></thead>
+        <tbody id="health-tb"></tbody>
+      </table>
+    </div>
   </div>
-  <div class="section">
-    <div class="section-title">Tutte le conversazioni</div>
-    <table><thead><tr><th>Utente</th><th>Titolo</th><th>Messaggi</th><th>Ultima att.</th><th></th></tr></thead><tbody id="cvb"></tbody></table>
+
+  <!-- Activity Feed + Top Questions -->
+  <div class="grid2">
+    <div class="sec">
+      <div class="sec-hd">
+        <div class="sec-title">Attività recente</div>
+        <div class="sec-meta">ultime domande in tempo reale</div>
+      </div>
+      <div class="feed" id="feed"></div>
+    </div>
+    <div class="sec">
+      <div class="sec-hd">
+        <div class="sec-title">Ambiti di interesse</div>
+        <div class="sec-meta">classificazione automatica delle domande</div>
+      </div>
+      <div class="qlist" id="top-q"></div>
+    </div>
+  </div>
+
+  <!-- All Conversations -->
+  <div class="grid1">
+    <div class="sec">
+      <div class="sec-hd">
+        <div class="sec-title">Tutte le conversazioni</div>
+        <div class="sec-meta" id="conv-meta"></div>
+      </div>
+      <table class="cvtab">
+        <thead><tr><th>Utente</th><th>Titolo</th><th>Msgs</th><th>Ultima attività</th><th></th></tr></thead>
+        <tbody id="cvb"></tbody>
+      </table>
+    </div>
   </div>
 </div>
+
+<!-- Conversation slide-in panel -->
 <div class="overlay" id="ov" onclick="closePanel()"></div>
 <div class="panel" id="panel">
-  <div class="panel-head">
-    <div style="flex:1"><div class="panel-title" id="pt"></div><div class="panel-sub" id="ps"></div></div>
-    <button onclick="closePanel()" style="background:none;border:none;cursor:pointer;color:#9ca3af;font-size:1.1rem;line-height:1">&#x2715;</button>
+  <div class="panel-hd">
+    <div style="flex:1">
+      <div class="panel-title" id="pt"></div>
+      <div class="panel-sub" id="ps"></div>
+    </div>
+    <button class="panel-close" onclick="closePanel()">&#x2715;</button>
   </div>
   <div class="panel-msgs" id="pm"></div>
 </div>
+
 <script>
-function esc(s){const d=document.createElement('div');d.textContent=s;return d.innerHTML}
-async function load(){
-  const [sr,cr]=await Promise.all([fetch('/api/admin/stats'),fetch('/api/admin/conversations')]);
-  const st=await sr.json(), cv=await cr.json();
-  document.getElementById('pg-sub').textContent=`${st.total_users} utenti · ${st.total_conversations} conversazioni · ${st.total_messages} messaggi`;
-  // Cards
-  const cc=[
-    {l:'Messaggi totali',v:st.total_messages.toLocaleString('it'),s:'tutti gli utenti'},
-    {l:'Conversazioni',v:st.total_conversations.toLocaleString('it'),s:'aperte'},
-    {l:'Utenti attivi',v:st.per_user.filter(u=>u.msgs>0).length,s:'hanno scritto'},
-    {l:'Ultimi 7 giorni',v:st.messages_per_day.reduce((a,r)=>a+r.msgs,0),s:'messaggi recenti'},
-  ];
-  document.getElementById('cards').innerHTML=cc.map(c=>`<div class="card"><div class="card-label">${c.l}</div><div class="card-value">${c.v}</div><div class="card-sub">${c.s}</div></div>`).join('');
-  // Chart
-  const days=st.messages_per_day;
-  if(days.length){
-    const mx=Math.max(...days.map(d=>d.msgs),1);
-    document.getElementById('chart').innerHTML=`<div class="bars">${days.map(d=>`<div class="bar" style="height:${Math.round(d.msgs/mx*68)+4}px" data-tip="${d.day}: ${d.msgs}"></div>`).join('')}</div><div class="bar-lbs">${days.map(d=>`<div class="bar-lb">${d.day.slice(5)}</div>`).join('')}</div>`;
-  }else{
-    document.getElementById('chart').innerHTML='<p style="color:#9ca3af;font-size:.83rem">Nessun messaggio negli ultimi 7 giorni.</p>';
-  }
-  // Utenti
-  document.getElementById('utb').innerHTML=st.per_user.map(u=>`<tr><td><strong>${u.display_name}</strong></td><td><span class="badge ${u.role}">${u.role==='admin'?'Admin':'Utente'}</span></td><td>${u.msgs||0}</td><td>${u.last_active?new Date(u.last_active).toLocaleString('it-IT'):'—'}</td></tr>`).join('');
-  // Conversazioni
-  document.getElementById('cvb').innerHTML=cv.map(c=>`<tr><td><strong>${c.user}</strong></td><td style="max-width:200px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis">${esc(c.title||'—')}</td><td>${c.n_messages}</td><td>${new Date(c.updated_at).toLocaleString('it-IT')}</td><td><button class="btn-sm" onclick="openPanel(${c.id},'${esc(c.title||'')}','${esc(c.user)}')">Apri</button></td></tr>`).join('');
+function esc(s){const d=document.createElement('div');d.textContent=s||'';return d.innerHTML}
+
+function relTime(s){
+  if(!s)return'—';
+  const d=new Date(s), m=Math.round((Date.now()-d)/60000);
+  if(m<2)return'Adesso';
+  if(m<60)return m+'m fa';
+  const h=Math.round(m/60);
+  if(h<24)return h+'h fa';
+  const days=Math.round(h/24);
+  if(days===1)return'Ieri';
+  if(days<30)return days+' giorni fa';
+  return d.toLocaleDateString('it-IT',{day:'2-digit',month:'short'});
 }
+
+function healthInfo(last){
+  if(!last)return{cls:'mai',lbl:'Mai usato'};
+  const h=(Date.now()-new Date(last))/3600000;
+  if(h<24) return{cls:'oggi',lbl:'Attivo oggi'};
+  if(h<168)return{cls:'sett',lbl:'Questa settimana'};
+  if(h<720)return{cls:'mese',lbl:'Questo mese'};
+  return{cls:'fermo',lbl:'Inattivo'};
+}
+
+async function load(){
+  try{
+    const [sr,cr]=await Promise.all([
+      fetch('/api/admin/stats'),
+      fetch('/api/admin/conversations')
+    ]);
+    const st=await sr.json(), cv=await cr.json();
+    render(st,cv);
+    document.getElementById('upd-lbl').textContent=new Date().toLocaleTimeString('it-IT',{hour:'2-digit',minute:'2-digit'});
+  }catch(e){
+    document.getElementById('pg-sub').textContent='Errore di caricamento — riprova tra poco.';
+  }
+}
+
+function render(st,cv){
+  // Subtitle
+  document.getElementById('pg-sub').textContent=
+    st.total_users+' utenti · '+st.total_conversations+' conversazioni · '+st.total_messages+' messaggi totali';
+
+  // KPI cards
+  const aktive=st.per_user.filter(u=>u.last_active&&(Date.now()-new Date(u.last_active))/86400000<30).length;
+  document.getElementById('kpis').innerHTML=[
+    {cls:'blue', lbl:'Messaggi oggi',   val:st.msgs_today,          sub:'domande inviate'},
+    {cls:'green',lbl:'Attivi 7 giorni', val:st.active_week+' / '+st.total_users, sub:'utenti hanno usato l\'app'},
+    {cls:'purple',lbl:'Conversazioni',  val:st.total_conversations, sub:'totali aperte'},
+    {cls:'amber', lbl:'Media msg/conv', val:(st.avg_msgs||0).toFixed(1), sub:'domande per conversazione'},
+  ].map(c=>`<div class="kpi ${c.cls}">
+    <div class="kpi-lbl">${c.lbl}</div>
+    <div class="kpi-val">${c.val}</div>
+    <div class="kpi-sub">${c.sub}</div>
+  </div>`).join('');
+
+  // Chart (14 giorni)
+  const days=st.messages_per_day||[];
+  const mx=Math.max(...days.map(d=>d.msgs),1);
+  const todayStr=new Date().toISOString().slice(0,10);
+  if(days.length){
+    document.getElementById('chart').innerHTML=days.map(d=>{
+      const h=Math.round((d.msgs/mx)*66)+4;
+      const isToday=d.day===todayStr;
+      const lbl=d.day.slice(5).replace('-','/');
+      return`<div class="cb-col" title="${d.day}: ${d.msgs} messaggi">
+        <div class="cb-fill ${isToday?'today':'has-data'}" style="height:${h}px"></div>
+        <div class="cb-lbl">${lbl}</div>
+      </div>`;
+    }).join('');
+  } else {
+    document.getElementById('chart').innerHTML='<div style="color:#9ca3af;font-size:.8rem;margin:auto">Nessun dato ancora</div>';
+  }
+
+  // User health table
+  const sorted=[...st.per_user].sort((a,b)=>{
+    if(!a.last_active&&!b.last_active)return 0;
+    if(!a.last_active)return 1;
+    if(!b.last_active)return -1;
+    return new Date(b.last_active)-new Date(a.last_active);
+  });
+  const inattivi=sorted.filter(u=>!u.last_active||(Date.now()-new Date(u.last_active))/3600000>168).length;
+  document.getElementById('health-meta').textContent=inattivi>0?inattivi+' inattivi da +7gg':'tutti attivi ✓';
+
+  document.getElementById('health-tb').innerHTML=sorted.map(u=>{
+    const hi=healthInfo(u.last_active);
+    const role=u.role==='admin'?'<span class="rb admin">Admin</span>':'<span class="rb user">Utente</span>';
+    return`<tr>
+      <td><div class="uname">${esc(u.display_name)}</div><div class="usub">${relTime(u.last_active)}</div></td>
+      <td><span class="hp ${hi.cls}">${hi.lbl}</span></td>
+      <td><span class="nb">${u.msgs_7d}<span class="nb-sub"> msg</span></span></td>
+      <td><span class="nb">${u.user_msgs}<span class="nb-sub"> tot</span></span></td>
+    </tr>`;
+  }).join('');
+
+  // Activity feed
+  const feed=st.recent_activity||[];
+  if(feed.length){
+    document.getElementById('feed').innerHTML=feed.map(f=>`
+      <div class="fi">
+        <div class="fi-av">${(f.display_name||'?')[0].toUpperCase()}</div>
+        <div class="fi-body">
+          <div class="fi-meta">${esc(f.display_name)} · ${relTime(f.created_at)}</div>
+          <div class="fi-text">${esc(f.content)}</div>
+        </div>
+      </div>`).join('');
+  } else {
+    document.getElementById('feed').innerHTML='<div style="color:#9ca3af;font-size:.8rem">Nessuna attività recente</div>';
+  }
+
+  // Ambiti di interesse — classificazione per topic
+  const allMsgs=st.all_messages||[];
+  const AMBITI=[
+    {key:'fatturato',   label:'Fatturato & Ricavi',
+     kw:['fatturato','ricav','vendite','venduto','incasso','revenue','importo','guadagno','entrat']},
+    {key:'clienti',     label:'Clienti',
+     kw:['client','acquirent','compratori','chi ha comprat','chi compra']},
+    {key:'paesi',       label:'Mercati & Paesi',
+     kw:['paese','paesi','stato estero','stati','nazione','nazioni','mercato','mercati','italia','usa','america','cina','france','german','spagna','portogallo','dove vendiamo','dove esportiamo']},
+    {key:'blocchi',     label:'Blocchi',
+     kw:['blocco','blocchi','block']},
+    {key:'lastre',      label:'Lastre',
+     kw:['lastra','lastre','slab']},
+    {key:'lavorazioni', label:'Lavorazioni',
+     kw:['lavoraz','segat','taglio','lucid','levigat','lavorato']},
+    {key:'prezzi',      label:'Prezzi & Costi',
+     kw:['prezzo','prezzi','costo','costi','valore','€','euro','quanto costa','quanto vale']},
+    {key:'fornitori',   label:'Fornitori',
+     kw:['fornitore','fornitori','supplier','cave','cava']},
+    {key:'materiali',   label:'Materiali & Qualità',
+     kw:['materiale','materiali','qualità','qualita','marmo','granito','travertino','onice','pietra','pietr','statuar','calacatta']},
+  ];
+  function classifyMsg(txt){
+    const t=txt.toLowerCase();
+    for(const a of AMBITI){ if(a.kw.some(k=>t.includes(k))) return a.key; }
+    return 'altro';
+  }
+  const counts={altro:0};
+  AMBITI.forEach(a=>counts[a.key]=0);
+  allMsgs.forEach(m=>{ counts[classifyMsg(m)]++; });
+  const rows=[...AMBITI.map(a=>({...a,n:counts[a.key]}))];
+  if(counts.altro>0) rows.push({key:'altro',label:'Altro',n:counts.altro});
+  rows.sort((a,b)=>b.n-a.n);
+  const maxN2=rows.length?rows[0].n:1;
+  const total=allMsgs.length||1;
+  document.getElementById('top-q').innerHTML=rows.length&&total>0?rows.filter(r=>r.n>0).map(r=>`
+    <div class="qi">
+      <div class="qi-text">${r.label}</div>
+      <div class="qi-bar-bg"><div class="qi-bar" style="width:${Math.round(r.n/maxN2*100)}%"></div></div>
+      <div class="qi-n">${r.n}<span style="font-size:.7rem;color:#9ca3af;margin-left:.3rem">${Math.round(r.n/total*100)}%</span></div>
+    </div>`).join(''):'<div style="color:#9ca3af;font-size:.8rem">Nessun dato</div>';
+
+  // All conversations
+  document.getElementById('conv-meta').textContent=cv.length+' totali';
+  document.getElementById('cvb').innerHTML=cv.map(c=>`
+    <tr>
+      <td><strong>${esc(c.user)}</strong></td>
+      <td style="max-width:200px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis">${esc(c.title||'—')}</td>
+      <td>${c.n_messages}</td>
+      <td>${relTime(c.updated_at)}</td>
+      <td><button class="btn-sm" onclick="openPanel(${c.id},'${esc(c.title||'')}','${esc(c.user)}')">Apri</button></td>
+    </tr>`).join('');
+}
+
 async function openPanel(id,title,user){
   document.getElementById('pt').textContent=title||'Conversazione';
   document.getElementById('ps').textContent='Utente: '+user;
-  const r=await fetch(`/api/conversation/${id}`);
-  const d=await r.json();
-  document.getElementById('pm').innerHTML=(d.messages||[]).map(m=>`<div class="pmsg ${m.role}"><div class="pmsg-meta">${m.role==='user'?'Utente':'Agente AI'} · ${new Date(m.created_at).toLocaleString('it-IT')}</div><div class="pmsg-text">${esc(m.content).replace(/\\n/g,'<br>')}</div></div>`).join('')||'<p style="color:#9ca3af">Nessun messaggio.</p>';
+  document.getElementById('pm').innerHTML='<div style="color:#9ca3af;font-size:.82rem">Caricamento...</div>';
   document.getElementById('panel').classList.add('open');
   document.getElementById('ov').classList.add('open');
+  const r=await fetch('/api/conversation/'+id);
+  const d=await r.json();
+  document.getElementById('pm').innerHTML=(d.messages||[]).map(m=>`
+    <div class="pmsg ${m.role}">
+      <div class="pmsg-meta">${m.role==='user'?'Utente':'Agente AI'} · ${relTime(m.created_at)}</div>
+      <div class="pmsg-text">${esc(m.content).replace(/\n/g,'<br>')}</div>
+    </div>`).join('')||'<p style="color:#9ca3af">Nessun messaggio.</p>';
 }
-function closePanel(){document.getElementById('panel').classList.remove('open');document.getElementById('ov').classList.remove('open');}
+function closePanel(){
+  document.getElementById('panel').classList.remove('open');
+  document.getElementById('ov').classList.remove('open');
+}
+
+// Auto-refresh ogni 45 secondi
 load();
+setInterval(load, 45000);
 </script>
 </body>
 </html>"""
@@ -1661,6 +1989,40 @@ load();
 # MAIN
 # ─────────────────────────────────────────────────────────────────────────────
 init_app_db()  # inizializzato sempre, anche con gunicorn
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DATA RETENTION — rolling 360 giorni
+# ─────────────────────────────────────────────────────────────────────────────
+def purge_old_data():
+    """Cancella messaggi e conversazioni più vecchi di 360 giorni."""
+    try:
+        conn = get_app_db()
+        # 1. Elimina messaggi oltre 360 giorni
+        conn.execute("""
+            DELETE FROM messages
+            WHERE created_at < datetime('now', '-360 days')
+        """)
+        # 2. Elimina conversazioni rimaste senza messaggi
+        #    (o aggiornate per l'ultima volta oltre 360 giorni fa)
+        conn.execute("""
+            DELETE FROM conversations
+            WHERE updated_at < datetime('now', '-360 days')
+              AND id NOT IN (SELECT DISTINCT conversation_id FROM messages)
+        """)
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass  # non bloccare il server in caso di errore
+
+def _retention_loop():
+    """Thread daemon: esegue purge ogni 24 ore."""
+    while True:
+        purge_old_data()
+        threading.Event().wait(86400)  # attendi 24 ore
+
+purge_old_data()  # esecuzione immediata all'avvio
+_t = threading.Thread(target=_retention_loop, daemon=True)
+_t.start()
 
 if __name__ == "__main__":
     PORT = int(os.environ.get("PORT", 7860))
