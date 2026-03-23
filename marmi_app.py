@@ -1449,13 +1449,14 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Inter',sans-serif;
 const USER_NAME = "{{USER_NAME}}";
 const IS_ADMIN  = {{IS_ADMIN}};
 let convs = {{CONVS_JSON}};
-let activeCid = null;
+let activeCid = convs.length ? convs[0].id : null;
 
 document.getElementById('av-el').textContent   = USER_NAME[0].toUpperCase();
 document.getElementById('name-el').textContent = USER_NAME;
 document.getElementById('role-el').textContent = IS_ADMIN ? 'Amministratore' : 'Utente';
 if(IS_ADMIN) document.getElementById('admin-nav').style.display = 'block';
 renderSidebar();
+if(activeCid) loadConv(activeCid);
 
 function toggleSidebar(){
   document.getElementById('sidebar').classList.toggle('open');
@@ -1837,16 +1838,24 @@ function healthInfo(last){
 }
 
 async function load(){
+  const sub=document.getElementById('pg-sub');
   try{
+    const ctrl=new AbortController();
+    const tid=setTimeout(()=>ctrl.abort(),15000);
     const [sr,cr]=await Promise.all([
-      fetch('/api/admin/stats'),
-      fetch('/api/admin/conversations')
+      fetch('/api/admin/stats',   {credentials:'same-origin',signal:ctrl.signal}),
+      fetch('/api/admin/conversations',{credentials:'same-origin',signal:ctrl.signal})
     ]);
+    clearTimeout(tid);
+    if(!sr.ok||!cr.ok){
+      sub.textContent='Sessione scaduta — ricarica la pagina.';
+      return;
+    }
     const st=await sr.json(), cv=await cr.json();
     render(st,cv);
     document.getElementById('upd-lbl').textContent=new Date().toLocaleTimeString('it-IT',{hour:'2-digit',minute:'2-digit'});
   }catch(e){
-    document.getElementById('pg-sub').textContent='Errore di caricamento — riprova tra poco.';
+    sub.textContent=e.name==='AbortError'?'Timeout — riprova tra poco.':'Errore di caricamento — ricarica la pagina.';
   }
 }
 
