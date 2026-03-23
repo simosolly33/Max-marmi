@@ -1142,7 +1142,10 @@ CHAT_HTML = r"""<!DOCTYPE html>
 <html lang="it">
 <head>
 <meta charset="UTF-8"><title>Agente AI — Max Marmi</title>
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
 <style>
 :root{
   --bg:#ffffff;
@@ -1243,41 +1246,77 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Inter',sans-serif;
 
 /* ── MOBILE ── */
 @media(max-width:700px){
-  body{font-size:14px}
+
+  /* Fix altezza reale iOS Safari (esclude barre browser) */
+  body{
+    font-size:14px;
+    height:100svh;          /* svh = small viewport height, esclude chrome browser */
+    height:-webkit-fill-available;
+  }
+  html{height:-webkit-fill-available}
 
   #menu-btn{display:flex;align-items:center;justify-content:center}
 
-  /* Sidebar: nascosta di default, slide-in quando open */
+  /* Sidebar: nascosta, slide-in come drawer */
   #sidebar{
-    position:fixed;top:0;left:-260px;height:100vh;z-index:200;
-    transition:left .22s ease;width:260px;min-width:0;
-    box-shadow:2px 0 16px rgba(0,0,0,.12)
+    position:fixed;top:0;left:-270px;
+    height:100%;height:-webkit-fill-available;
+    z-index:200;width:260px;min-width:0;
+    transition:left .22s ease;
+    box-shadow:2px 0 20px rgba(0,0,0,.18)
   }
   #sidebar.open{left:0}
   #sidebar-overlay.open{display:block}
 
-  /* Main: occupa tutta la larghezza */
-  #main{width:100%;min-width:0}
+  /* Main: colonna piena, altezza gestita con flex */
+  #main{
+    width:100%;min-width:0;
+    display:flex;flex-direction:column;
+    height:100%;
+  }
 
-  /* Header più compatto */
-  #chat-top{padding:0 14px;height:48px}
-  #chat-top-title{font-size:.84rem}
+  /* Header compatto */
+  #chat-top{padding:0 12px;height:48px;flex-shrink:0}
+  #chat-top-title{font-size:.82rem}
+  .badge-ai{font-size:.62rem;padding:2px 7px}
 
-  /* Messaggi: meno padding, larghezza piena */
-  #messages{padding:20px 12px;gap:16px}
+  /* Messaggi: scorrimento naturale, padding bottom per non finire sotto l'input */
+  #messages{
+    flex:1;
+    overflow-y:auto;
+    -webkit-overflow-scrolling:touch;
+    padding:16px 12px 16px 12px;
+    gap:16px;
+  }
   .msg-wrap{max-width:100%}
-  .bubble{font-size:.85rem;padding:10px 13px}
+  .bubble{font-size:.85rem;padding:10px 13px;line-height:1.6}
 
-  /* Input zone */
-  #input-zone{padding:10px 12px 18px}
-  .hint{font-size:.68rem}
+  /* INPUT: fixed al fondo, sopra la safe area iPhone */
+  #input-zone{
+    flex-shrink:0;
+    padding:10px 12px;
+    padding-bottom:calc(12px + env(safe-area-inset-bottom, 0px));
+    border-top:1px solid var(--border);
+    background:#fff;
+    /* rimane nel flow flex, non position:fixed — più affidabile con tastiera */
+  }
+  .input-box{border-radius:14px;padding:8px 10px 8px 14px}
+  #inp{font-size:16px;/* 16px previene zoom automatico iOS */max-height:100px}
+  #send{width:32px;height:32px;border-radius:8px}
+  .hint{display:none}/* nasconde il suggerimento "Invio per inviare" su mobile */
 
-  /* Chips a scorrimento orizzontale su mobile */
-  .chips{flex-wrap:nowrap;overflow-x:auto;justify-content:flex-start;padding-bottom:4px;-webkit-overflow-scrolling:touch}
-  .chip{white-space:nowrap;flex-shrink:0}
+  /* Chips a scorrimento orizzontale */
+  .chips{flex-wrap:nowrap;overflow-x:auto;justify-content:flex-start;
+    padding-bottom:4px;-webkit-overflow-scrolling:touch;padding-left:2px}
+  .chip{white-space:nowrap;flex-shrink:0;font-size:.78rem}
 
-  /* Tabelle responsive */
-  .bubble table{display:block;overflow-x:auto;-webkit-overflow-scrolling:touch}
+  /* Tabelle scrollabili orizzontalmente */
+  .bubble table{display:block;overflow-x:auto;-webkit-overflow-scrolling:touch;font-size:.75rem}
+  .bubble th,.bubble td{padding:6px 10px}
+
+  /* Empty state più compatto */
+  .empty h2{font-size:1.1rem}
+  .empty p{font-size:.82rem}
 }
 </style>
 </head>
@@ -1471,7 +1510,21 @@ function md(text){
 
 document.getElementById('inp').addEventListener('input',function(){
   this.style.height='auto';
-  this.style.height=Math.min(this.scrollHeight,140)+'px';
+  this.style.height=Math.min(this.scrollHeight,100)+'px';
+});
+
+// Fix altezza reale iOS Safari — aggiorna quando la tastiera appare/scompare
+function fixMobileHeight(){
+  if(window.innerWidth<=700){
+    document.documentElement.style.setProperty('--real-vh', window.innerHeight+'px');
+    document.getElementById('main').style.height = window.innerHeight+'px';
+  }
+}
+fixMobileHeight();
+window.addEventListener('resize', fixMobileHeight);
+// Scroll in fondo ai messaggi quando la tastiera appare su mobile
+document.getElementById('inp').addEventListener('focus', function(){
+  setTimeout(()=>{ document.getElementById('messages').scrollTop=99999; },350);
 });
 </script>
 </body>
