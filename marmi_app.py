@@ -726,6 +726,26 @@ def build_context(history):
 # ─────────────────────────────────────────────────────────────────────────────
 # ROUTES — AUTH
 # ─────────────────────────────────────────────────────────────────────────────
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if request.method == "POST":
+        username = request.form.get("username", "").strip().lower()
+        password = request.form.get("password", "").strip()
+        pwd_hash = hashlib.sha256(password.encode()).hexdigest()
+        conn = get_app_db()
+        user = conn.execute(
+            "SELECT * FROM users WHERE username=? AND password_hash=?",
+            (username, pwd_hash)).fetchone()
+        conn.close()
+        if user:
+            session["user_id"]      = user["id"]
+            session["username"]     = user["username"]
+            session["display_name"] = user["display_name"]
+            session["role"]         = user["role"]
+            return redirect("/")
+        return render_login("Username o password non corretti.")
+    return render_login()
+
 @app.route("/logout")
 def logout():
     session.clear()
