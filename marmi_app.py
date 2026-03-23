@@ -153,32 +153,29 @@ def init_app_db():
     """)
     conn.commit()
 
-    # Crea utenti se non esistono
+    # Utenti con password fisse (hash SHA256) — stesse credenziali su Mac e Railway
     USERS = [
-        ("simone",  "Simone",  "admin"),
-        ("giacomo", "Giacomo", "admin"),
-        ("kevin",   "Kevin",   "admin"),
-        ("matteo",  "Matteo",  "user"),
-        ("marco",   "Marco",   "user"),
-        ("luca",    "Luca",    "user"),
-        ("sara",    "Sara",    "user"),
-        ("andrea",  "Andrea",  "user"),
-        ("paolo",   "Paolo",   "user"),
-        ("chiara",  "Chiara",  "user"),
+        ("simone",  "Simone",  "cbce41a0de0fca1919b46bc998f338df601e88345135ae7f6a9ff985f1aafa62", "admin"),
+        ("giacomo", "Giacomo", "b347eeea78e90986736a137631bb4c7980e76482049786978804b18cb44946a9", "admin"),
+        ("kevin",   "Kevin",   "77f94c6d45631e69cf34d82cada5b4372cbe7aee0c7f442e6da30a62fd5e9d9e", "admin"),
+        ("matteo",  "Matteo",  "4c07c575a4c51b70efd75df3d76e4a7852cf7b6d65de7ae52815569d9d6e454a", "user"),
+        ("marco",   "Marco",   "fa3c4f56045dc71e61cd91b00510ef378dbcf8c3d40f639238d3ad7d0e92f908", "user"),
+        ("luca",    "Luca",    "a2ae3ff45e20c99a18a16cf8b2684fbcc1d9f95351a9f53b0313fbc0d01a021a", "user"),
+        ("sara",    "Sara",    "989e152d2c827aafc977d986defa45a4affbfa6f8fbf3d69640a427478649f2d", "user"),
+        ("andrea",  "Andrea",  "f7cef64d74b25cda1e188eabe86486f262b4f9d7667525b80be3d179d7162aa8", "user"),
+        ("paolo",   "Paolo",   "c4ed7def5da4c88826304f57d9fa333d3845cea9cc732873ccb9984da21107cc", "user"),
+        ("chiara",  "Chiara",  "00b52ecb3da58637135826cc44a5c49f5bbf2d7a718ba301ad6df18c2a922503", "user"),
     ]
-    # Password salvate in un file separato
-    pwd_file = BASE_DIR / "credenziali_utenti.txt"
     if not conn.execute("SELECT 1 FROM users LIMIT 1").fetchone():
-        lines = ["MAX MARMI — CREDENZIALI UTENTI\n" + "="*40 + "\n\n"]
-        for uname, dname, role in USERS:
-            pwd = secrets.token_urlsafe(8)
-            h   = hashlib.sha256(pwd.encode()).hexdigest()
+        for uname, dname, h, role in USERS:
             conn.execute("INSERT OR IGNORE INTO users (username,display_name,password_hash,role) VALUES (?,?,?,?)",
                          (uname, dname, h, role))
-            tag = "👑 ADMIN" if role == "admin" else "👤 Utente"
-            lines.append(f"{tag}\n  Username : {uname}\n  Password : {pwd}\n\n")
         conn.commit()
-        pwd_file.write_text("".join(lines), encoding="utf-8")
+    else:
+        # Aggiorna hash se cambiano (es. primo deploy aveva password diverse)
+        for uname, dname, h, role in USERS:
+            conn.execute("UPDATE users SET password_hash=?, role=? WHERE username=?", (h, role, uname))
+        conn.commit()
     conn.close()
 
 # ─────────────────────────────────────────────────────────────────────────────
