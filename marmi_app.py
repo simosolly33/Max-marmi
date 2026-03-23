@@ -54,42 +54,131 @@ AI_ENABLED = _AI_PKG and bool(_load_api_key())
 _DB_SCHEMA = """
 Database SQLite 'marmi.db' — archivio blocchi Max Marmi Carrara SRL (2012-2025)
 
+═══════════════════════════════════════════════════════════════════
+SORGENTE A — Dati estratti dagli Excel (schede per blocco)
+═══════════════════════════════════════════════════════════════════
+
 Tabella `blocchi` (5.010 righe — una per blocco di marmo):
+  id            INTEGER   PK
   anno          INTEGER   anno acquisto/lavorazione (2012–2025)
-  numero_blocco INTEGER   numero identificativo blocco
+  numero_blocco INTEGER   numero identificativo blocco (es. 9184, 12913)
   data_acquisto TEXT      data acquisto (testo)
   materiale     TEXT      tipo marmo (es. CALACATTA, STATUARIO, ARABESCATO VAGLI,
                           BIANCO CARRARA, BARDIGLIO, NERO MARQUINA, BOTTICINO…)
   fornitore     TEXT      nome fornitore/cava
   deposito      TEXT      luogo di deposito/stoccaggio
   stato         TEXT      stato: EVASO=venduto/lavorato, LASTRE=tagliato in lastre,
-                          ROOT=in magazzino originale
+                          ROOT=in magazzino originale, LASTRE_EVASO=lastre vendute
   peso_ton      REAL      peso in tonnellate
-  costo_blocco  REAL      costo acquisto blocco grezzo
-  spese_trasporto REAL    spese di trasporto
+  costo_blocco  REAL      costo acquisto blocco grezzo (€)
+  spese_trasporto REAL    spese di trasporto (€)
   costo_finale  REAL      costo totale (costo_blocco + spese_trasporto + lavorazioni)
-  totale_ricavi REAL      ricavi totali generati dal blocco
+  totale_ricavi REAL      ricavi totali generati dal blocco (€)
   differenze    REAL      margine = totale_ricavi - costo_finale (pos=profitto, neg=perdita)
   ha_lavorazioni INTEGER  1 se il blocco ha lavorazioni associate
 
-Tabella `lavorazioni` (operazioni di trasformazione blocchi):
-  blocco_id   INTEGER FK → blocchi.rowid
-  tipo        TEXT    tipo operazione (SEGAGIONE, LUCIDATURA, RESINATURA, TAGLIO, …)
+Tabella `lavorazioni` (7.508 righe — operazioni di trasformazione blocchi):
+  blocco_id   INTEGER FK → blocchi.id
+  tipo        TEXT    tipo operazione (SEGAGIONE, LUCIDATURA, RESINATURA, SCAPEZZATURA, STUCCATURA, …)
+  n_lastre    INTEGER numero lastre prodotte
+  dim1, dim2  REAL    dimensioni (cm)
   mq          REAL    metri quadri lavorati
-  prezzo      REAL    prezzo per mq
-  totale_euro REAL    costo totale operazione
+  prezzo_unit REAL    prezzo per mq (€)
+  totale_euro REAL    costo totale operazione (€)
 
-Tabella `ricavi` (dettaglio ricavi per blocco):
-  blocco_id   INTEGER FK → blocchi.rowid
-  tipo        TEXT    tipo ricavo
-  mq          REAL    mq venduti
-  prezzo      REAL    prezzo/mq
-  totale_euro REAL    totale ricavo
+Tabella `ricavi` (5.346 righe — dettaglio ricavi per blocco):
+  blocco_id    INTEGER FK → blocchi.id
+  fattura_ref  TEXT    riferimento fattura
+  tipo_vendita TEXT    tipo di vendita
+  quantita     REAL    quantità venduta
+  prezzo_unit  REAL    prezzo unitario (€)
+  totale_euro  REAL    totale ricavo (€)
+
+═══════════════════════════════════════════════════════════════════
+SORGENTE B — Dati dal gestionale ERP (export al 31/12/2025)
+═══════════════════════════════════════════════════════════════════
+
+Tabella `csv_blocchi` (2.208 righe — blocchi e sub-blocchi dal gestionale):
+  id            INTEGER   id ERP del blocco
+  codice        TEXT      codice blocco: "09184" (puro), "12913/B" (sub-blocco), "12928/B/2" (secondo taglio)
+  codice_padre  TEXT      codice del blocco genitore (NULL se originale)
+  livello_taglio INTEGER  0=originale, 1=primo taglio (/B), 2=secondo taglio (/B/N), 3=terzo taglio
+  materiale     TEXT      materiale (sempre "MARMO" in questa tabella)
+  qualita       TEXT      qualità specifica (es. CALACATTA MACCHIA VECCHIA, ZEBRINO, PAONAZZO,
+                          BARDIGLIO TRAMBISERA, CALACATTA PICASSO, CALACATTA VIOLA, VENATO LP…)
+  peso_kg       REAL      peso in kg
+  altezza_cm    REAL      altezza in cm
+  larghezza_cm  REAL      larghezza in cm
+  profondita_cm REAL      profondità/lunghezza in cm
+  carico_data   TEXT      data di carico (formato DD/MM/YYYY)
+  fornitore     TEXT      ragione sociale fornitore
+  categoria     TEXT      categoria assegnata
+  numero_blocco_db INTEGER numero estratto dal codice (es. 12913 da "12913/B") — usare per JOIN con blocchi.numero_blocco
+
+Tabella `csv_lastre` (2.197 righe — lastre dal gestionale):
+  id            INTEGER   id ERP
+  codice        TEXT      codice lastra (es. "2013-09911-00-01")
+  qualita       TEXT      qualità specifica (es. BIANCO VENATO, CALACATTA MACCHIA VECCHIA…)
+  quantita      INTEGER   numero lastre nel gruppo
+  peso_kg       REAL      peso complessivo (kg)
+  altezza_cm    REAL      altezza (cm)
+  larghezza_cm  REAL      larghezza (cm)
+  spessore_cm   REAL      spessore (cm) — tipicamente 2, 3, 5 cm
+  blocco_origine_id      INTEGER  id del blocco di origine (se derivano da segagione)
+  blocco_origine_codice  TEXT     codice del blocco di origine
+  carico_data   TEXT      data carico (DD/MM/YYYY)
+  fornitore     TEXT      fornitore
+
+Tabella `csv_lavorazioni` (6.013 righe — lavorazioni dal gestionale con costi):
+  prodotto_tipo TEXT      "BLO"=blocco, "LAS"=lastre
+  prodotto_id   INTEGER   id del blocco o delle lastre
+  prodotto_codice TEXT    codice del prodotto lavorato
+  documento_codice TEXT   codice documento (es. DOC_FA = Fattura Acquisto)
+  documento_descrizione TEXT tipo documento
+  data          TEXT      data lavorazione (DD/MM/YYYY)
+  fornitore     TEXT      chi ha eseguito la lavorazione
+  costo_totale  REAL      costo totale lavorazione (€)
+  lavorazione1  TEXT      tipo prima lavorazione (es. Fresatura, Bisellatura, Segagione…)
+  lavorazione2  TEXT      tipo seconda lavorazione (se presente)
+  lavorazione3  TEXT      tipo terza lavorazione (se presente)
+
+Tabella `csv_vendite` (3.783 righe — vendite dal gestionale con clienti completi):
+  documento_codice TEXT   codice documento di vendita o nota di credito
+  documento_descrizione TEXT tipo (es. "Fattura di vendita", "Nota di credito")
+  documento_data TEXT     data (DD/MM/YYYY)
+  cliente_id    INTEGER   id cliente
+  cliente       TEXT      ragione sociale cliente
+  cliente_indirizzo TEXT  indirizzo
+  cliente_localita TEXT   città/località
+  cliente_provincia TEXT  provincia
+  cliente_stato TEXT      paese (es. IT, US, CN, AU, GB, FR…)
+  prodotto_tipo TEXT      "BLO"=blocco, "LAS"=lastre
+  prodotto_id   INTEGER   id prodotto venduto
+  prodotto_codice TEXT    codice prodotto venduto
+  prodotto_unita REAL     unità vendute (lastre: numero; blocco: 1)
+  prezzo_totale REAL      importo totale IVA esclusa (€)
+  prezzo_um     TEXT      unità di misura prezzo (C=complessivo, MQ=a mq, MC=a mc, TN=tonnellate)
+  prezzo_valore REAL      valore calcolato
+
+═══════════════════════════════════════════════════════════════════
+JOIN TRA LE DUE SORGENTI
+═══════════════════════════════════════════════════════════════════
+- blocchi.numero_blocco = csv_blocchi.numero_blocco_db  (collega le due anagrafi dello stesso blocco)
+- csv_blocchi.codice = csv_lavorazioni.prodotto_codice   (quando prodotto_tipo='BLO')
+- csv_lastre.id = csv_lavorazioni.prodotto_id            (quando prodotto_tipo='LAS')
+- csv_blocchi.codice = csv_vendite.prodotto_codice       (vendite di blocchi)
+- csv_lastre.id = csv_vendite.prodotto_id                (vendite di lastre)
+- csv_lastre.blocco_origine_id = csv_blocchi.id          (lastra derivata da un blocco)
 
 NOTE IMPORTANTI:
-- Usa sempre UPPER() o LIKE '%...%' per i nomi dei materiali (sono in maiuscolo nel DB)
-- Per i filtri su materiale usa: UPPER(materiale) LIKE '%CALACATTA%'
-- La colonna 'differenze' rappresenta il margine (profitto/perdita per blocco)
+- Le date nella Sorgente B sono in formato DD/MM/YYYY — usa SUBSTR per estrarre l'anno: SUBSTR(documento_data,-4)
+- Usa UPPER() o LIKE '%...%' per i nomi dei materiali/qualità
+- La Sorgente B ha dati 2020-2025 con ricavi reali per anno
+- csv_vendite.prezzo_totale è il dato di fatturato commerciale affidabile
+- csv_blocchi.qualita è il nome preciso della qualità (Sorgente A usa nomi abbreviati)
+- Per domande su fatturato, clienti, paesi → usa csv_vendite
+- Per domande su dimensioni fisiche blocchi → usa csv_blocchi (altezza_cm, larghezza_cm, profondita_cm)
+- Per margini e costi → usa Sorgente A (blocchi.differenze, blocchi.costo_finale)
 - Raggruppa sempre per anno o materiale nelle analisi aggregate
 - Usa ROUND(val, 0) o ROUND(val, 2) per valori numerici
 """
