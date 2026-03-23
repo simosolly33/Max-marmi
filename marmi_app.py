@@ -1314,9 +1314,10 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Inter',sans-serif;
   .bubble table{display:block;overflow-x:auto;-webkit-overflow-scrolling:touch;font-size:.75rem}
   .bubble th,.bubble td{padding:6px 10px}
 
-  /* Empty state più compatto */
-  .empty h2{font-size:1.1rem}
-  .empty p{font-size:.82rem}
+  /* Empty state mobile: solo il titolo, niente descrizione né suggerimenti */
+  .empty h2{font-size:1.15rem}
+  .empty p{display:none}
+  .chips{display:none}
 }
 </style>
 </head>
