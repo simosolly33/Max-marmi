@@ -1016,7 +1016,7 @@ def list_conversations():
 @app.route("/admin")
 @admin_required
 def admin():
-    return ADMIN_HTML
+    return render_admin(current_user())
 
 @app.route("/api/admin/stats")
 @admin_required
@@ -1176,6 +1176,18 @@ def render_chat(convs, user):
                     .replace("{{IS_ADMIN}}", is_admin) \
                     .replace("{{CONVS_JSON}}", convs_json) \
                     .replace("{{AI_BADGE}}", ai_badge)
+
+def render_admin(user):
+    conn = get_app_db()
+    convs = conn.execute("""
+        SELECT id, title, updated_at FROM conversations
+        WHERE user_id=? ORDER BY updated_at DESC LIMIT 50
+    """, (user["id"],)).fetchall()
+    conn.close()
+    convs_json = json.dumps([dict(c) for c in convs], ensure_ascii=False)
+    return ADMIN_HTML.replace("{{USER_NAME}}", user["display_name"]) \
+                     .replace("{{IS_ADMIN}}", "true") \
+                     .replace("{{CONVS_JSON}}", convs_json)
 
 CHAT_HTML = r"""<!DOCTYPE html>
 <html lang="it">
