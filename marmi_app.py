@@ -956,6 +956,11 @@ def ask():
         conn.commit()
         cid = cur.lastrowid
     else:
+        # Verifica che la conversazione appartenga all'utente (o che sia admin)
+        owner = conn.execute("SELECT user_id FROM conversations WHERE id=?", (cid,)).fetchone()
+        if not owner or (u["role"] != "admin" and owner["user_id"] != u["id"]):
+            conn.close()
+            return jsonify(error="Non autorizzato"), 403
         # Aggiorna titolo se primo messaggio
         first = conn.execute("SELECT COUNT(*) cnt FROM messages WHERE conversation_id=?",
                              (cid,)).fetchone()["cnt"]
