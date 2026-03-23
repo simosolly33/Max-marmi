@@ -196,16 +196,16 @@ Se un utente chiede "cosa sai fare?" o "che dati hai?" rispondi sempre così
 
 "Ho accesso a questi dati di Max Marmi Carrara:
 
-📦 **Archivio blocchi 2012–2025** (~5.000 blocchi):
+📦 Archivio blocchi 2012–2025 (~5.000 blocchi):
 Tipo di marmo, fornitore, peso, costo di acquisto, ricavi generati e margine per ogni blocco. Posso dirti quali blocchi hanno reso di più, quali sono in perdita, come sono andati gli anni, i fornitori migliori.
 
-💰 **Vendite 2020–2025** (~3.800 fatture):
+💰 Vendite 2020–2025 (~3.800 fatture):
 Nome del cliente, paese, cosa ha comprato, importo di ogni fattura. Posso dirti chi sono i clienti top, in quali paesi vendiamo di più, qual è il fatturato per anno o per tipo di marmo.
 
-🔧 **Lavorazioni** (~6.000 operazioni, principalmente 2020–2025):
+🔧 Lavorazioni (~6.000 operazioni, principalmente 2020–2025):
 Segagione, lucidatura, fresatura, bisellatura e altri trattamenti. Posso dirti i costi per tipo di lavorazione e chi le ha eseguite.
 
-🪨 **Lastre** (~2.200 gruppi):
+🪨 Lastre (~2.200 gruppi):
 Dimensioni, spessori, peso e blocco di origine. Posso dirti le caratteristiche delle lastre in archivio.
 
 ⚠️ Per le vendite e i clienti ho solo i dati dal 2020 in poi. Prima del 2020 ho i costi e i ricavi per blocco, ma non i nomi dei clienti."
@@ -242,7 +242,7 @@ REGOLE DI RISPOSTA
 4. Per domande semplici rispondi con UNA frase + il dato chiave
 5. Usa tabelle Markdown SOLO se ci sono più di 3 righe di dati da confrontare
 6. Formatta i numeri: €1.234.567 per valori monetari (punto migliaia, nessun decimale)
-7. Usa **grassetto** per il dato chiave della risposta
+7. NON usare mai grassetto, asterischi o markdown di formattazione — scrivi solo testo normale
 8. Se la domanda è ambigua, fai un'assunzione ragionevole e comunicala in modo naturale
 9. Sii conciso: non scrivere più di quello che serve per rispondere bene
 10. Puoi incrociare più fonti di dati per rispondere a domande complesse
@@ -591,24 +591,24 @@ def format_answer(rows, title, question=""):
         diff = r.get("margine") or r.get("differenze")
         stato= r.get("stato","")
         dep  = r.get("deposito","")
-        txt  = f"Il blocco **BL {r.get('numero_blocco','')}** è di **{mat}**, acquistato nel **{anno}**"
-        if forn and forn != "N/D": txt += f" dal fornitore **{forn}**"
+        txt  = f"Il blocco BL {r.get('numero_blocco','')} è di {mat}, acquistato nel {anno}"
+        if forn and forn != "N/D": txt += f" dal fornitore {forn}"
         txt += "."
-        if dep:  txt += f" Deposito: **{dep}**."
+        if dep:  txt += f" Deposito: {dep}."
         if peso:
-            try: txt += f" Peso: **{float(peso):,.2f} t**."
+            try: txt += f" Peso: {float(peso):,.2f} t."
             except: pass
         if costo:
-            try: txt += f" Costo: **€{float(costo):,.0f}**."
+            try: txt += f" Costo: €{float(costo):,.0f}."
             except: pass
         if ric:
-            try: txt += f" Ricavi: **€{float(ric):,.0f}**."
+            try: txt += f" Ricavi: €{float(ric):,.0f}."
             except: pass
         if diff:
             try:
                 d = float(diff)
                 esito = "positivo" if d >= 0 else "negativo"
-                txt += f" Margine ({esito}): **€{d:,.0f}**."
+                txt += f" Margine ({esito}): €{d:,.0f}."
             except: pass
         if stato: txt += f" Stato: _{stato}_."
         return txt
@@ -622,7 +622,7 @@ def format_answer(rows, title, question=""):
             ann = r.get("anno","")
             ric = r.get("ricavi") or r.get("totale_ricavi")
             mg  = r.get("margine") or r.get("differenze")
-            line = f"**BL {bl}** — {mat}, {ann}"
+            line = f"BL {bl} — {mat}, {ann}"
             if ric:
                 try: line += f", ricavi €{float(ric):,.0f}"
                 except: pass
@@ -638,10 +638,10 @@ def format_answer(rows, title, question=""):
         tot_m = sum(r.get("margine") or 0 for r in rows)
         best  = max(rows, key=lambda r: r.get("fatturato") or 0)
         worst = min(rows, key=lambda r: r.get("fatturato") or 0)
-        intro = (f"In **{n} anni** analizzati il fatturato complessivo è stato **€{tot_f:,.0f}** "
-                 f"con margine totale **€{tot_m:,.0f}**. "
-                 f"Anno migliore: **{best.get('anno')}** (€{(best.get('fatturato') or 0):,.0f}), "
-                 f"anno con meno fatturato: **{worst.get('anno')}** (€{(worst.get('fatturato') or 0):,.0f}).")
+        intro = (f"In {n} anni analizzati il fatturato complessivo è stato €{tot_f:,.0f} "
+                 f"con margine totale €{tot_m:,.0f}. "
+                 f"Anno migliore: {best.get('anno')} (€{(best.get('fatturato') or 0):,.0f}), "
+                 f"anno con meno fatturato: {worst.get('anno')} (€{(worst.get('fatturato') or 0):,.0f}).")
 
     # 4. Materiale + fatturato
     elif "materiale" in cols and ("fatturato_totale" in cols or "ricavo_medio" in cols):
@@ -650,18 +650,18 @@ def format_answer(rows, title, question=""):
         tot  = sum(r.get("fatturato_totale") or r.get("ricavo_medio") or 0 for r in rows)
         try:
             perc = float(fatt)/float(tot)*100 if tot else 0
-            intro = (f"Su **{n} materiali**, il più redditizio è **{best.get('materiale')}** "
-                     f"con **€{float(fatt):,.0f}** ({perc:.0f}% del totale). "
-                     f"Fatturato totale combinato: **€{tot:,.0f}**.")
+            intro = (f"Su {n} materiali, il più redditizio è {best.get('materiale')} "
+                     f"con €{float(fatt):,.0f} ({perc:.0f}% del totale). "
+                     f"Fatturato totale combinato: €{tot:,.0f}.")
         except:
-            intro = f"Il materiale più redditizio è **{best.get('materiale')}**."
+            intro = f"Il materiale più redditizio è {best.get('materiale')}."
 
     # 5. Materiale + conteggio
     elif "materiale" in cols and "blocchi" in cols:
         best   = rows[0]
         tot_bl = sum(r.get("blocchi") or 0 for r in rows)
-        intro  = (f"L'archivio ha **{tot_bl} blocchi** distribuiti in **{n} materiali**. "
-                  f"Il più presente è **{best.get('materiale')}** con **{best.get('blocchi')} blocchi**.")
+        intro  = (f"L'archivio ha {tot_bl} blocchi distribuiti in {n} materiali. "
+                  f"Il più presente è {best.get('materiale')} con {best.get('blocchi')} blocchi.")
 
     # 6. Fornitore
     elif "fornitore" in cols:
@@ -669,11 +669,11 @@ def format_answer(rows, title, question=""):
         tot_bl = sum(r.get("blocchi") or 0 for r in rows)
         fatt   = best.get("fatturato") or best.get("margine_totale") or 0
         try:
-            intro = (f"Lavorato con **{n} fornitori** per **{tot_bl} blocchi** totali. "
-                     f"Il fornitore principale è **{best.get('fornitore')}** "
-                     f"con **€{float(fatt):,.0f}** di fatturato.")
+            intro = (f"Lavorato con {n} fornitori per {tot_bl} blocchi totali. "
+                     f"Il fornitore principale è {best.get('fornitore')} "
+                     f"con €{float(fatt):,.0f} di fatturato.")
         except:
-            intro = f"Hai lavorato con **{n} fornitori**."
+            intro = f"Hai lavorato con {n} fornitori."
 
     # 7. Blocchi con margine (top/bottom)
     elif "numero_blocco" in cols and ("margine" in cols or "differenze" in cols):
@@ -683,14 +683,14 @@ def format_answer(rows, title, question=""):
         negativi= sum(1 for r in rows if (r.get(mc) or 0) < 0)
         try:
             if float(marg_v) >= 0:
-                intro = (f"Top **{n} blocchi** per profittabilità. "
-                         f"Il migliore è **BL {best.get('numero_blocco')}** ({best.get('materiale','')}) "
-                         f"con **€{float(marg_v):,.0f}** di margine. "
+                intro = (f"Top {n} blocchi per profittabilità. "
+                         f"Il migliore è BL {best.get('numero_blocco')} ({best.get('materiale','')}) "
+                         f"con €{float(marg_v):,.0f} di margine. "
                          f"{negativi} blocchi in questa lista sono in perdita.")
             else:
-                intro = (f"**{n} blocchi in perdita**. "
-                         f"Il peggiore è **BL {best.get('numero_blocco')}** ({best.get('materiale','')}) "
-                         f"con **–€{abs(float(marg_v)):,.0f}**.")
+                intro = (f"{n} blocchi in perdita. "
+                         f"Il peggiore è BL {best.get('numero_blocco')} ({best.get('materiale','')}) "
+                         f"con –€{abs(float(marg_v)):,.0f}.")
         except:
             intro = f"Elenco {n} blocchi."
 
@@ -700,30 +700,30 @@ def format_answer(rows, title, question=""):
         tot_op   = sum(r.get("operazioni") or 0 for r in rows)
         tot_cost = sum(r.get("costo_totale") or 0 for r in rows)
         try:
-            intro = (f"**{tot_op} operazioni** di lavorazione per un costo totale di **€{float(tot_cost):,.0f}**. "
-                     f"La tipologia più costosa è **{best.get('tipo')}** (€{float(best.get('costo_totale',0)):,.0f}).")
+            intro = (f"{tot_op} operazioni di lavorazione per un costo totale di €{float(tot_cost):,.0f}. "
+                     f"La tipologia più costosa è {best.get('tipo')} (€{float(best.get('costo_totale',0)):,.0f}).")
         except:
             intro = f"Lavorazioni suddivise per {n} tipologie."
 
     # 9. Stato
     elif "stato" in cols and "blocchi" in cols:
         tot_b = sum(r.get("blocchi") or 0 for r in rows)
-        intro = f"L'archivio ha **{tot_b} blocchi totali** in {n} categorie di stato."
+        intro = f"L'archivio ha {tot_b} blocchi totali in {n} categorie di stato."
 
     # 10. Deposito
     elif "deposito" in cols and "blocchi" in cols:
         best  = rows[0]
         tot_b = sum(r.get("blocchi") or 0 for r in rows)
-        intro = (f"Blocchi in **{n} depositi**, totale **{tot_b}**. "
-                 f"Il deposito principale è **{best.get('deposito')}** ({best.get('blocchi')} blocchi).")
+        intro = (f"Blocchi in {n} depositi, totale {tot_b}. "
+                 f"Il deposito principale è {best.get('deposito')} ({best.get('blocchi')} blocchi).")
 
     # 11. Peso
     elif "peso_medio" in cols:
         best  = rows[0]
         tot_t = sum(r.get("totale_ton") or 0 for r in rows)
         try:
-            intro = (f"Peso medio più alto: **{best.get('materiale')}** a **{best.get('peso_medio')} t/blocco**. "
-                     f"Peso totale archivio: **{tot_t:,.0f} t**.")
+            intro = (f"Peso medio più alto: {best.get('materiale')} a {best.get('peso_medio')} t/blocco. "
+                     f"Peso totale archivio: {tot_t:,.0f} t.")
         except:
             intro = "Analisi peso per materiale."
 
@@ -732,14 +732,14 @@ def format_answer(rows, title, question=""):
         best  = rows[0]
         tot_c = sum(r.get("costo_totale") or 0 for r in rows)
         try:
-            intro = (f"Investimento totale: **€{float(tot_c):,.0f}**. "
-                     f"Materiale con costo più alto: **{best.get('materiale')}** (€{float(best.get('costo_totale',0)):,.0f}).")
+            intro = (f"Investimento totale: €{float(tot_c):,.0f}. "
+                     f"Materiale con costo più alto: {best.get('materiale')} (€{float(best.get('costo_totale',0)):,.0f}).")
         except:
             intro = "Analisi costi per materiale."
 
     # Fallback
     else:
-        intro = f"Ho trovato **{n} risultati** per la tua richiesta."
+        intro = f"Ho trovato {n} risultati per la tua richiesta."
 
     # Tabella Markdown
     hdr  = "| " + " | ".join(c.replace("_"," ") for c in cols) + " |"
@@ -778,10 +778,10 @@ def ai_natural_query(question, history=None):
 
     # Costruisce messaggi con contesto storico (alternanza user/assistant garantita)
     msgs = []
-    for h in (history or [])[-6:]:
+    for h in (history or [])[-4:]:
         role = "user" if h.get("role") == "user" else "assistant"
         content = h.get("content", "")
-        if content and len(content) < 3000:
+        if content and len(content) < 1500:
             # Evita messaggi consecutivi dello stesso ruolo
             if msgs and msgs[-1]["role"] == role:
                 continue
@@ -793,14 +793,14 @@ def ai_natural_query(question, history=None):
 
     resp = client.messages.create(
         model="claude-haiku-4-5-20251001",
-        max_tokens=2000,
+        max_tokens=700,
         system=_AI_SYSTEM,
         tools=tools,
         messages=msgs
     )
 
     # Agentic loop
-    for _ in range(5):
+    for _ in range(3):
         if resp.stop_reason != "tool_use":
             break
 
@@ -826,7 +826,7 @@ def ai_natural_query(question, history=None):
                     conn.row_factory = sqlite3.Row
                     rows = conn.execute(sql).fetchall()
                     conn.close()
-                    data = [dict(r) for r in rows[:100]]
+                    data = [dict(r) for r in rows[:50]]
                     result_str = json.dumps(data, ensure_ascii=False, default=str)
                 except Exception as e:
                     result_str = f"Errore SQL: {str(e)}"
@@ -842,7 +842,7 @@ def ai_natural_query(question, history=None):
         ]
         resp = client.messages.create(
             model="claude-haiku-4-5-20251001",
-            max_tokens=2000,
+            max_tokens=700,
             system=_AI_SYSTEM,
             tools=tools,
             messages=msgs
@@ -986,10 +986,10 @@ def ask():
         err_msg = str(e)
         # Mostra errore di autenticazione direttamente
         if "authentication" in err_msg.lower() or "api_key" in err_msg.lower() or "401" in err_msg:
-            answer = ("⚠️ **API key non valida o mancante.** "
+            answer = ("⚠️ API key non valida o mancante. "
                       "Controlla il file `.anthropic_key` nella cartella dell'app e inserisci una chiave valida.")
         elif "credit" in err_msg.lower() or "billing" in err_msg.lower():
-            answer = ("⚠️ **Credito esaurito sull'account Anthropic.** "
+            answer = ("⚠️ Credito esaurito sull'account Anthropic. "
                       "Ricarica il credito su console.anthropic.com per usare l'Agente AI.")
         else:
             # Fallback silenzioso al sistema regex
@@ -1557,7 +1557,7 @@ function md(text){
       out+=`<tr>${cells.map(c=>`<${tag}>${c}</${tag}>`).join('')}</tr>`;
     }else{
       if(inT){if(inTb)out+='</tbody>';out+='</table>';inT=false;inTb=false;}
-      let r=l.replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>');
+      let r=l.replace(/\*\*(.+?)\*\*/g,'$1');
       if(r.trim())out+=r+'<br>';else if(out)out+='<br>';
     }
   }
@@ -1859,7 +1859,7 @@ function render(st,cv){
   const aktive=st.per_user.filter(u=>u.last_active&&(Date.now()-new Date(u.last_active))/86400000<30).length;
   document.getElementById('kpis').innerHTML=[
     {cls:'blue', lbl:'Messaggi oggi',   val:st.msgs_today,          sub:'domande inviate'},
-    {cls:'green',lbl:'Attivi 7 giorni', val:st.active_week+' / '+st.total_users, sub:'utenti hanno usato l\'app'},
+    {cls:'green',lbl:'Attivi 7 giorni', val:st.active_week+' / '+st.total_users, sub:"utenti hanno usato l'app"},
     {cls:'purple',lbl:'Conversazioni',  val:st.total_conversations, sub:'totali aperte'},
     {cls:'amber', lbl:'Media msg/conv', val:(st.avg_msgs||0).toFixed(1), sub:'domande per conversazione'},
   ].map(c=>`<div class="kpi ${c.cls}">
