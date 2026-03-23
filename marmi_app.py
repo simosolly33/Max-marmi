@@ -1080,10 +1080,10 @@ def admin_stats():
         ORDER BY m.created_at DESC LIMIT 15
     """).fetchall()
 
-    # Messaggi utente per classificazione ambiti
-    all_msgs = conn.execute("""
-        SELECT content FROM messages WHERE role='user'
-        ORDER BY created_at DESC LIMIT 500
+    # Top domande
+    top_q = conn.execute("""
+        SELECT content, COUNT(*) n FROM messages
+        WHERE role='user' GROUP BY content ORDER BY n DESC LIMIT 8
     """).fetchall()
 
     conn.close()
@@ -1097,7 +1097,7 @@ def admin_stats():
         messages_per_day=[dict(r) for r in days14],
         per_user=[dict(r) for r in per_user],
         recent_activity=[dict(r) for r in recent],
-        all_messages=[r['content'] for r in all_msgs]
+        top_queries=[dict(r) for r in top_q]
     )
 
 @app.route("/api/admin/conversations")
@@ -1777,8 +1777,7 @@ nav{background:#fff;border-bottom:1px solid #e5e7eb;padding:0 22px;display:flex;
     </div>
     <div class="sec">
       <div class="sec-hd">
-        <div class="sec-title">Ambiti di interesse</div>
-        <div class="sec-meta">classificazione automatica delle domande</div>
+        <div class="sec-title">Domande frequenti</div>
       </div>
       <div class="qlist" id="top-q"></div>
     </div>
@@ -1838,24 +1837,16 @@ function healthInfo(last){
 }
 
 async function load(){
-  const sub=document.getElementById('pg-sub');
   try{
-    const ctrl=new AbortController();
-    const tid=setTimeout(()=>ctrl.abort(),15000);
     const [sr,cr]=await Promise.all([
-      fetch('/api/admin/stats',   {credentials:'same-origin',signal:ctrl.signal}),
-      fetch('/api/admin/conversations',{credentials:'same-origin',signal:ctrl.signal})
+      fetch('/api/admin/stats'),
+      fetch('/api/admin/conversations')
     ]);
-    clearTimeout(tid);
-    if(!sr.ok||!cr.ok){
-      sub.textContent='Sessione scaduta — ricarica la pagina.';
-      return;
-    }
     const st=await sr.json(), cv=await cr.json();
     render(st,cv);
     document.getElementById('upd-lbl').textContent=new Date().toLocaleTimeString('it-IT',{hour:'2-digit',minute:'2-digit'});
   }catch(e){
-    sub.textContent=e.name==='AbortError'?'Timeout — riprova tra poco.':'Errore di caricamento — ricarica la pagina.';
+    document.getElementById('pg-sub').textContent='Errore — ricarica la pagina (F5).';
   }
 }
 
@@ -1931,46 +1922,14 @@ function render(st,cv){
     document.getElementById('feed').innerHTML='<div style="color:#9ca3af;font-size:.8rem">Nessuna attività recente</div>';
   }
 
-  // Ambiti di interesse — classificazione per topic
-  const allMsgs=st.all_messages||[];
-  const AMBITI=[
-    {key:'fatturato',   label:'Fatturato & Ricavi',
-     kw:['fatturato','ricav','vendite','venduto','incasso','revenue','importo','guadagno','entrat']},
-    {key:'clienti',     label:'Clienti',
-     kw:['client','acquirent','compratori','chi ha comprat','chi compra']},
-    {key:'paesi',       label:'Mercati & Paesi',
-     kw:['paese','paesi','stato estero','stati','nazione','nazioni','mercato','mercati','italia','usa','america','cina','france','german','spagna','portogallo','dove vendiamo','dove esportiamo']},
-    {key:'blocchi',     label:'Blocchi',
-     kw:['blocco','blocchi','block']},
-    {key:'lastre',      label:'Lastre',
-     kw:['lastra','lastre','slab']},
-    {key:'lavorazioni', label:'Lavorazioni',
-     kw:['lavoraz','segat','taglio','lucid','levigat','lavorato']},
-    {key:'prezzi',      label:'Prezzi & Costi',
-     kw:['prezzo','prezzi','costo','costi','valore','€','euro','quanto costa','quanto vale']},
-    {key:'fornitori',   label:'Fornitori',
-     kw:['fornitore','fornitori','supplier','cave','cava']},
-    {key:'materiali',   label:'Materiali & Qualità',
-     kw:['materiale','materiali','qualità','qualita','marmo','granito','travertino','onice','pietra','pietr','statuar','calacatta']},
-  ];
-  function classifyMsg(txt){
-    const t=txt.toLowerCase();
-    for(const a of AMBITI){ if(a.kw.some(k=>t.includes(k))) return a.key; }
-    return 'altro';
-  }
-  const counts={altro:0};
-  AMBITI.forEach(a=>counts[a.key]=0);
-  allMsgs.forEach(m=>{ counts[classifyMsg(m)]++; });
-  const rows=[...AMBITI.map(a=>({...a,n:counts[a.key]}))];
-  if(counts.altro>0) rows.push({key:'altro',label:'Altro',n:counts.altro});
-  rows.sort((a,b)=>b.n-a.n);
-  const maxN2=rows.length?rows[0].n:1;
-  const total=allMsgs.length||1;
-  document.getElementById('top-q').innerHTML=rows.length&&total>0?rows.filter(r=>r.n>0).map(r=>`
+  // Domande frequenti
+  const tq=st.top_queries||[];
+  const maxN=tq.length?tq[0].n:1;
+  document.getElementById('top-q').innerHTML=tq.length?tq.map(q=>`
     <div class="qi">
-      <div class="qi-text">${r.label}</div>
-      <div class="qi-bar-bg"><div class="qi-bar" style="width:${Math.round(r.n/maxN2*100)}%"></div></div>
-      <div class="qi-n">${r.n}<span style="font-size:.7rem;color:#9ca3af;margin-left:.3rem">${Math.round(r.n/total*100)}%</span></div>
+      <div class="qi-text" title="${esc(q.content)}">${esc(q.content)}</div>
+      <div class="qi-bar-bg"><div class="qi-bar" style="width:${Math.round(q.n/maxN*100)}%"></div></div>
+      <div class="qi-n">${q.n}</div>
     </div>`).join(''):'<div style="color:#9ca3af;font-size:.8rem">Nessun dato</div>';
 
   // All conversations
