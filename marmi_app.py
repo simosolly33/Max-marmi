@@ -9,7 +9,8 @@ import os, sqlite3, json, re, hashlib, secrets, datetime, threading
 from pathlib import Path
 from functools import wraps
 from flask import (Flask, request, jsonify, session,
-                   redirect, url_for, make_response)
+                   redirect, url_for, make_response,
+                   Response, stream_with_context)
 
 try:
     import anthropic as _anthropic
@@ -855,6 +856,136 @@ def ai_natural_query(question, history=None):
         answer = format_answer(rows, title, question)
     return answer
 
+def ai_stream_tokens(question, history=None):
+    """
+    Generator: esegue il tool-loop sincrono, poi fa streaming dell'ultima risposta.
+    Yields stringhe di testo (token / chunk).
+    """
+    client = _get_ai_client()
+    if not client:
+        rows, title = natural_query(question)
+        yield format_answer(rows, title, question)
+        return
+
+    tools = [{
+        "name": "execute_sql",
+        "description": (
+            "Esegue una query SQL SELECT sul database marmi.db (sola lettura) e restituisce i risultati in JSON. "
+            "SOLO query SELECT. Vietato INSERT, UPDATE, DELETE, DROP, CREATE, ALTER, PRAGMA, ATTACH. "
+            "Limita sempre a max 100 righe con LIMIT. "
+            "JOIN tra tabelle: blocchi.id = lavorazioni.blocco_id = ricavi.blocco_id."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Query SQL SQLite valida (solo SELECT)"}
+            },
+            "required": ["query"]
+        }
+    }]
+
+    msgs = []
+    for h in (history or [])[-4:]:
+        role = "user" if h.get("role") == "user" else "assistant"
+        content = h.get("content", "")
+        if content and len(content) < 1500:
+            if msgs and msgs[-1]["role"] == role:
+                continue
+            msgs.append({"role": role, "content": content})
+    if msgs and msgs[-1]["role"] == "user":
+        msgs.pop()
+    msgs.append({"role": "user", "content": question})
+
+    _FORBIDDEN = ['INSERT','UPDATE','DELETE','DROP','CREATE','ALTER',
+                  'ATTACH','DETACH','REPLACE','TRUNCATE','VACUUM',
+                  'REINDEX','ANALYZE']
+
+    def _run_tool(block):
+        sql = block.input.get("query", "").strip()
+        sql_upper = sql.upper()
+        if not sql_upper.lstrip().startswith("SELECT") or any(
+                re.search(rf'\b{kw}\b', sql_upper) for kw in _FORBIDDEN):
+            return "Operazione non consentita: solo query SELECT di sola lettura."
+        try:
+            conn = sqlite3.connect(f"file:{MARMI_DB}?mode=ro", uri=True)
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(sql).fetchall()
+            conn.close()
+            return json.dumps([dict(r) for r in rows[:50]], ensure_ascii=False, default=str)
+        except Exception as e:
+            return f"Errore SQL: {str(e)}"
+
+    # ── Tool-use loop (non-streaming: veloce perché SQLite è locale) ──────────
+    resp = client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=700,
+        system=_AI_SYSTEM,
+        tools=tools,
+        messages=msgs
+    )
+
+    needs_stream_call = False
+    for _ in range(3):
+        if resp.stop_reason != "tool_use":
+            break
+        needs_stream_call = True   # useremo streaming per la chiamata finale
+        tool_results = []
+        for block in resp.content:
+            if block.type != "tool_use":
+                continue
+            tool_results.append({
+                "type": "tool_result",
+                "tool_use_id": block.id,
+                "content": _run_tool(block)
+            })
+        msgs = msgs + [
+            {"role": "assistant", "content": resp.content},
+            {"role": "user",      "content": tool_results}
+        ]
+        resp = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=700,
+            system=_AI_SYSTEM,
+            tools=tools,
+            messages=msgs
+        )
+
+    # ── Risposta finale ────────────────────────────────────────────────────────
+    if resp.stop_reason == "end_turn" and not needs_stream_call:
+        # Prima chiamata già end_turn: nessun tool usato, risposta già pronta
+        text_parts = [b.text for b in resp.content if hasattr(b, "text") and b.text]
+        answer = "\n".join(text_parts).strip()
+        if answer:
+            yield answer
+            return
+
+    if resp.stop_reason == "end_turn" and needs_stream_call:
+        # Tool usato, poi end_turn. Facciamo streaming della risposta finale
+        # richiamando con gli stessi messaggi (incluso ultimo tool result)
+        try:
+            with client.messages.stream(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=700,
+                system=_AI_SYSTEM,
+                messages=msgs
+            ) as stream:
+                for chunk in stream.text_stream:
+                    if chunk:
+                        yield chunk
+            return
+        except Exception:
+            # fallback: yield testo già in resp
+            text_parts = [b.text for b in resp.content if hasattr(b, "text") and b.text]
+            answer = "\n".join(text_parts).strip()
+            if answer:
+                yield answer
+                return
+
+    # Fallback finale
+    rows, title = natural_query(question)
+    yield format_answer(rows, title, question)
+
+
 def build_context(history):
     """Costruisce il contesto degli ultimi N turni per la risposta."""
     if not history:
@@ -1004,6 +1135,104 @@ def ask():
 
     return jsonify(answer=answer, conversation_id=cid, title=q[:50])
 
+@app.route("/api/ask_stream")
+@login_required
+def ask_stream():
+    """SSE endpoint per risposte AI in streaming."""
+    u   = current_user()
+    q   = request.args.get("q", "").strip()
+    cid_param = request.args.get("cid", "")
+    cid = int(cid_param) if cid_param.isdigit() else None
+
+    def _sse(obj):
+        return "data: " + json.dumps(obj, ensure_ascii=False) + "\n\n"
+
+    def generate():
+        nonlocal cid
+        if not q:
+            yield _sse({"error": "Domanda vuota"})
+            return
+
+        conn = get_app_db()
+        # Crea o verifica conversazione
+        if not cid:
+            cur = conn.execute("INSERT INTO conversations (user_id,title) VALUES (?,?)",
+                               (u["id"], q[:50]))
+            conn.commit()
+            cid_local = cur.lastrowid
+        else:
+            cid_local = cid
+            owner = conn.execute("SELECT user_id FROM conversations WHERE id=?",
+                                 (cid_local,)).fetchone()
+            if not owner or (u["role"] != "admin" and owner["user_id"] != u["id"]):
+                conn.close()
+                yield _sse({"error": "Non autorizzato"})
+                return
+            first = conn.execute("SELECT COUNT(*) cnt FROM messages WHERE conversation_id=?",
+                                 (cid_local,)).fetchone()["cnt"]
+            if first == 0:
+                conn.execute("UPDATE conversations SET title=? WHERE id=?", (q[:50], cid_local))
+
+        # Salva messaggio utente
+        conn.execute("INSERT INTO messages (conversation_id,role,content) VALUES (?,?,?)",
+                     (cid_local, "user", q))
+        conn.execute("UPDATE conversations SET updated_at=datetime('now') WHERE id=?", (cid_local,))
+        conn.commit()
+
+        # Carica storico
+        history = [dict(m) for m in conn.execute(
+            "SELECT role,content FROM messages WHERE conversation_id=? ORDER BY id DESC LIMIT 10",
+            (cid_local,)).fetchall()]
+        history.reverse()
+        conn.close()
+
+        # Streaming AI
+        answer_parts = []
+        try:
+            for chunk in ai_stream_tokens(q, history):
+                if chunk:
+                    answer_parts.append(chunk)
+                    yield _sse({"token": chunk})
+        except Exception as e:
+            err = str(e)
+            if "authentication" in err.lower() or "api_key" in err.lower() or "401" in err:
+                fallback = ("API key non valida o mancante. "
+                            "Controlla il file `.anthropic_key` e inserisci una chiave valida.")
+            elif "credit" in err.lower() or "billing" in err.lower():
+                fallback = ("Credito esaurito sull'account Anthropic. "
+                            "Ricarica il credito su console.anthropic.com.")
+            else:
+                rows, title_fb = natural_query(q)
+                fallback = format_answer(rows, title_fb, q)
+            answer_parts = [fallback]
+            yield _sse({"token": fallback})
+
+        answer = "".join(answer_parts).strip()
+        if not answer:
+            rows, title_fb = natural_query(q)
+            answer = format_answer(rows, title_fb, q)
+            yield _sse({"token": answer})
+
+        # Salva risposta in DB
+        conn2 = get_app_db()
+        conn2.execute("INSERT INTO messages (conversation_id,role,content) VALUES (?,?,?)",
+                      (cid_local, "assistant", answer))
+        conn2.commit()
+        conn2.close()
+
+        yield _sse({"done": True, "cid": cid_local, "title": q[:50]})
+
+    return Response(
+        stream_with_context(generate()),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive"
+        }
+    )
+
+
 @app.route("/api/conversations")
 @login_required
 def list_conversations():
@@ -1021,41 +1250,27 @@ def list_conversations():
 @app.route("/admin")
 @admin_required
 def admin():
-    return render_admin(current_user())
-
-@app.route("/api/admin/stats")
-@admin_required
-def admin_stats():
+    u = current_user()
     conn = get_app_db()
 
     total_msgs  = conn.execute("SELECT COUNT(*) c FROM messages WHERE role='user'").fetchone()["c"]
     total_convs = conn.execute("SELECT COUNT(*) c FROM conversations").fetchone()["c"]
     total_users = conn.execute("SELECT COUNT(*) c FROM users").fetchone()["c"]
-
-    msgs_today = conn.execute("""
-        SELECT COUNT(*) c FROM messages
-        WHERE role='user' AND date(created_at)=date('now')
-    """).fetchone()["c"]
-
+    msgs_today  = conn.execute("SELECT COUNT(*) c FROM messages WHERE role='user' AND date(created_at)=date('now')").fetchone()["c"]
     active_week = conn.execute("""
         SELECT COUNT(DISTINCT c.user_id) c FROM conversations c
         JOIN messages m ON m.conversation_id=c.id
         WHERE m.role='user' AND m.created_at >= datetime('now','-7 days')
     """).fetchone()["c"]
-
     avg_msgs = conn.execute("""
         SELECT ROUND(AVG(cnt),1) v FROM
         (SELECT COUNT(*) cnt FROM messages WHERE role='user' GROUP BY conversation_id)
     """).fetchone()["v"] or 0
-
-    # Ultimi 14 giorni
     days14 = conn.execute("""
         SELECT date(created_at) day, COUNT(*) msgs
         FROM messages WHERE role='user' AND created_at >= datetime('now','-14 days')
         GROUP BY day ORDER BY day
     """).fetchall()
-
-    # Per-user con health info
     per_user = conn.execute("""
         SELECT u.id, u.display_name, u.username, u.role,
                COALESCE(SUM(CASE WHEN m.role='user' THEN 1 ELSE 0 END),0) user_msgs,
@@ -1066,55 +1281,53 @@ def admin_stats():
         FROM users u
         LEFT JOIN conversations c ON c.user_id=u.id
         LEFT JOIN messages m ON m.conversation_id=c.id
-        GROUP BY u.id
-        ORDER BY last_active DESC
+        GROUP BY u.id ORDER BY last_active DESC
     """).fetchall()
-
-    # Attività recente (ultime 15 domande utente)
     recent = conn.execute("""
         SELECT u.display_name, m.content, m.created_at
-        FROM messages m
-        JOIN conversations c ON c.id=m.conversation_id
+        FROM messages m JOIN conversations c ON c.id=m.conversation_id
         JOIN users u ON u.id=c.user_id
-        WHERE m.role='user'
-        ORDER BY m.created_at DESC LIMIT 15
+        WHERE m.role='user' ORDER BY m.created_at DESC LIMIT 15
     """).fetchall()
-
-    # Top domande
     top_q = conn.execute("""
         SELECT content, COUNT(*) n FROM messages
         WHERE role='user' GROUP BY content ORDER BY n DESC LIMIT 8
     """).fetchall()
-
-    conn.close()
-    return jsonify(
-        total_messages=total_msgs,
-        total_conversations=total_convs,
-        total_users=total_users,
-        msgs_today=msgs_today,
-        active_week=active_week,
-        avg_msgs=float(avg_msgs),
-        messages_per_day=[dict(r) for r in days14],
-        per_user=[dict(r) for r in per_user],
-        recent_activity=[dict(r) for r in recent],
-        top_queries=[dict(r) for r in top_q]
-    )
-
-@app.route("/api/admin/conversations")
-@admin_required
-def admin_conversations():
-    conn = get_app_db()
-    convs = conn.execute("""
-        SELECT c.id, u.display_name user, c.title,
-               c.created_at, c.updated_at,
+    convs_all = conn.execute("""
+        SELECT c.id, u.display_name user, c.title, c.updated_at,
                COUNT(m.id) n_messages
-        FROM conversations c
-        JOIN users u ON u.id=c.user_id
+        FROM conversations c JOIN users u ON u.id=c.user_id
         LEFT JOIN messages m ON m.conversation_id=c.id
         GROUP BY c.id ORDER BY c.updated_at DESC
     """).fetchall()
     conn.close()
-    return jsonify([dict(c) for c in convs])
+
+    pagedata = json.dumps({
+        "total_messages":    total_msgs,
+        "total_conversations": total_convs,
+        "total_users":       total_users,
+        "msgs_today":        msgs_today,
+        "active_week":       active_week,
+        "avg_msgs":          float(avg_msgs),
+        "messages_per_day":  [dict(r) for r in days14],
+        "per_user":          [dict(r) for r in per_user],
+        "recent_activity":   [dict(r) for r in recent],
+        "top_queries":       [dict(r) for r in top_q],
+        "conversations":     [dict(r) for r in convs_all],
+        "updated":           datetime.datetime.now().strftime("%H:%M:%S")
+    }, ensure_ascii=False, default=str)
+
+    return ADMIN_HTML.replace("__PAGEDATA__", pagedata)
+
+@app.route("/api/admin/conversation/<int:cid>")
+@admin_required
+def admin_get_conversation(cid):
+    conn = get_app_db()
+    msgs = conn.execute(
+        "SELECT role, content, created_at FROM messages WHERE conversation_id=? ORDER BY id",
+        (cid,)).fetchall()
+    conn.close()
+    return jsonify(messages=[dict(m) for m in msgs])
 
 # ─────────────────────────────────────────────────────────────────────────────
 # HTML TEMPLATES — Design pulito, bianco, elegante
@@ -1509,22 +1722,56 @@ async function send(){
   inp.value=''; inp.style.height='auto';
   const es=document.getElementById('empty-state'); if(es) es.remove();
   addMsg('user',q);
-  const typing=addTyping();
   document.getElementById('messages').scrollTop=99999;
+
+  // Crea bolla bot vuota (streaming riempirà il testo)
+  const msgs=document.getElementById('messages');
+  const wrap=document.createElement('div'); wrap.className='msg-wrap bot';
+  const av=document.createElement('div'); av.className='av'; av.textContent='A';
+  const bub=document.createElement('div'); bub.className='bubble';
+  bub.innerHTML='<div class="dots"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div>';
+  wrap.appendChild(av); wrap.appendChild(bub); msgs.appendChild(wrap);
+
+  let rawText='';
+  let firstToken=true;
+
   try{
-    const r=await fetch('/api/ask',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({q,conversation_id:activeCid})});
-    const d=await r.json();
-    typing.remove();
-    if(d.error){addMsg('bot','Errore: '+d.error);return;}
-    addMsg('bot',d.answer);
-    activeCid=d.conversation_id;
-    const idx=convs.findIndex(c=>c.id===d.conversation_id);
-    if(idx>=0){convs[idx].title=d.title;convs[idx].updated_at=new Date().toISOString();}
-    else convs.unshift({id:d.conversation_id,title:d.title,updated_at:new Date().toISOString()});
-    document.getElementById('chat-top-title').textContent=d.title;
-    renderSidebar();
-  }catch(e){typing.remove();addMsg('bot','Errore di connessione. Riprova.');}
-  document.getElementById('messages').scrollTop=99999;
+    const cidParam=activeCid?'&cid='+activeCid:'';
+    const url='/api/ask_stream?q='+encodeURIComponent(q)+cidParam;
+    const resp=await fetch(url);
+    if(!resp.ok){bub.textContent='Errore di connessione. Riprova.';return;}
+    const reader=resp.body.getReader();
+    const dec=new TextDecoder();
+    let buf='';
+    while(true){
+      const {done,value}=await reader.read();
+      if(done) break;
+      buf+=dec.decode(value,{stream:true});
+      const parts=buf.split('\n\n');
+      buf=parts.pop();
+      for(const part of parts){
+        if(!part.startsWith('data:')) continue;
+        let obj;
+        try{obj=JSON.parse(part.slice(5).trim());}catch(e){continue;}
+        if(obj.error){bub.textContent='Errore: '+obj.error;return;}
+        if(obj.token){
+          rawText+=obj.token;
+          if(firstToken){bub.innerHTML='';firstToken=false;}
+          bub.innerHTML=md(rawText);
+          msgs.scrollTop=99999;
+        }
+        if(obj.done){
+          activeCid=obj.cid;
+          const idx=convs.findIndex(c=>c.id===obj.cid);
+          if(idx>=0){convs[idx].title=obj.title;convs[idx].updated_at=new Date().toISOString();}
+          else convs.unshift({id:obj.cid,title:obj.title,updated_at:new Date().toISOString()});
+          document.getElementById('chat-top-title').textContent=obj.title;
+          renderSidebar();
+        }
+      }
+    }
+  }catch(e){bub.textContent='Errore di connessione. Riprova.';}
+  msgs.scrollTop=99999;
 }
 
 function addMsg(role,content){
@@ -1836,18 +2083,11 @@ function healthInfo(last){
   return{cls:'fermo',lbl:'Inattivo'};
 }
 
-async function load(){
-  try{
-    const [sr,cr]=await Promise.all([
-      fetch('/api/admin/stats'),
-      fetch('/api/admin/conversations')
-    ]);
-    const st=await sr.json(), cv=await cr.json();
-    render(st,cv);
-    document.getElementById('upd-lbl').textContent=new Date().toLocaleTimeString('it-IT',{hour:'2-digit',minute:'2-digit'});
-  }catch(e){
-    document.getElementById('pg-sub').textContent='Errore — ricarica la pagina (F5).';
-  }
+const PAGEDATA = __PAGEDATA__;
+function load(){
+  const st=PAGEDATA, cv=PAGEDATA.conversations||[];
+  render(st,cv);
+  document.getElementById('upd-lbl').textContent=PAGEDATA.updated||'';
 }
 
 function render(st,cv){
@@ -1950,7 +2190,7 @@ async function openPanel(id,title,user){
   document.getElementById('pm').innerHTML='<div style="color:#9ca3af;font-size:.82rem">Caricamento...</div>';
   document.getElementById('panel').classList.add('open');
   document.getElementById('ov').classList.add('open');
-  const r=await fetch('/api/conversation/'+id);
+  const r=await fetch('/api/admin/conversation/'+id);
   const d=await r.json();
   document.getElementById('pm').innerHTML=(d.messages||[]).map(m=>`
     <div class="pmsg ${m.role}">
@@ -1963,9 +2203,10 @@ function closePanel(){
   document.getElementById('ov').classList.remove('open');
 }
 
-// Auto-refresh ogni 45 secondi
+// Render immediato con dati già presenti
 load();
-setInterval(load, 45000);
+// Auto-refresh ogni 30 secondi (ricarica pagina = dati freschi)
+setTimeout(()=>location.reload(), 30000);
 </script>
 </body>
 </html>"""
