@@ -750,23 +750,70 @@ def format_answer(rows, title, question=""):
 
 def ai_natural_query(question, history=None):
     """
-    Usa Claude API con tool use per rispondere in modo conversazionale.
-    Claude genera l'SQL, lo esegue, interpreta i risultati e risponde in italiano.
+    Risponde in modo conversazionale usando 1 sola chiamata API quando possibile.
+    Strategia:
+      1. Esegui subito natural_query() (regex, velocissimo, 0 chiamate API)
+      2a. Se i dati ci sono → 1 chiamata Claude solo per formattare la risposta
+      2b. Se i dati NON ci sono → 1 chiamata Claude con tool use per generare SQL custom
+    Totale: sempre 1 chiamata API invece di 2.
     """
     client = _get_ai_client()
+
+    # ── Step 1: interroga il DB con il motore regex (0 chiamate API) ──────────
+    rows, title = natural_query(question)
+
     if not client:
-        rows, title = natural_query(question)
         return format_answer(rows, title, question)
 
-    history = history or []
+    _SYSTEM_FORMAT = (
+        "Sei l'assistente AI di Max Marmi Carrara. "
+        "Rispondi sempre in italiano, in modo chiaro e diretto. "
+        "NON usare mai grassetto, asterischi o qualsiasi markdown. "
+        "Scrivi solo testo normale. "
+        "Se ci sono numeri monetari formattali con il simbolo €. "
+        "Sii conciso: massimo 4-5 frasi salvo tabelle di dati."
+    )
 
+    # ── Step 2a: dati trovati → 1 chiamata solo per formattare ───────────────
+    if rows:
+        data_str = json.dumps(rows[:40], ensure_ascii=False, default=str)
+        # Contesto storico compatto (solo ultimi 2 turni)
+        ctx = ""
+        for h in (history or [])[-4:]:
+            role = "Utente" if h.get("role") == "user" else "Assistente"
+            content = h.get("content", "")[:300]
+            if content:
+                ctx += f"{role}: {content}\n"
+        user_msg = (
+            f"{ctx}Utente: {question}\n\n"
+            f"Dati dal database ({title}):\n{data_str}\n\n"
+            "Rispondi in italiano basandoti su questi dati. "
+            "Non inventare nulla che non sia nei dati. "
+            "Se sono molti record, fai un riepilogo sintetico."
+        )
+        try:
+            resp = client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=600,
+                system=_SYSTEM_FORMAT,
+                messages=[{"role": "user", "content": user_msg}]
+            )
+            text = "".join(
+                b.text for b in resp.content if hasattr(b, "text") and b.text
+            ).strip()
+            return text if text else format_answer(rows, title, question)
+        except Exception:
+            return format_answer(rows, title, question)
+
+    # ── Step 2b: nessun dato dal regex → tool use per SQL custom ─────────────
     tools = [{
         "name": "execute_sql",
         "description": (
-            "Esegue una query SQL SELECT sul database marmi.db (sola lettura) e restituisce i risultati in JSON. "
-            "SOLO query SELECT. Vietato INSERT, UPDATE, DELETE, DROP, CREATE, ALTER, PRAGMA, ATTACH. "
-            "Limita sempre a max 100 righe con LIMIT. "
-            "JOIN tra tabelle: blocchi.id = lavorazioni.blocco_id = ricavi.blocco_id."
+            "Esegue una query SQL SELECT sul database marmi.db (sola lettura). "
+            "SOLO SELECT. Vietato INSERT, UPDATE, DELETE, DROP, CREATE, ALTER, PRAGMA, ATTACH. "
+            "Limita a max 50 righe con LIMIT. "
+            "Tabelle: blocchi, lavorazioni, ricavi. "
+            "JOIN: blocchi.id = lavorazioni.blocco_id = ricavi.blocco_id."
         ),
         "input_schema": {
             "type": "object",
@@ -777,19 +824,19 @@ def ai_natural_query(question, history=None):
         }
     }]
 
-    # Costruisce messaggi con contesto storico (alternanza user/assistant garantita)
+    _FORBIDDEN = ['INSERT','UPDATE','DELETE','DROP','CREATE','ALTER',
+                  'ATTACH','DETACH','REPLACE','TRUNCATE','VACUUM','REINDEX','ANALYZE']
+
     msgs = []
     for h in (history or [])[-4:]:
         role = "user" if h.get("role") == "user" else "assistant"
         content = h.get("content", "")
         if content and len(content) < 1500:
-            # Evita messaggi consecutivi dello stesso ruolo
             if msgs and msgs[-1]["role"] == role:
                 continue
             msgs.append({"role": role, "content": content})
-    # L'ultimo messaggio deve essere sempre l'utente corrente
     if msgs and msgs[-1]["role"] == "user":
-        msgs.pop()  # rimuovi per evitare doppio user
+        msgs.pop()
     msgs.append({"role": "user", "content": question})
 
     resp = client.messages.create(
@@ -800,35 +847,27 @@ def ai_natural_query(question, history=None):
         messages=msgs
     )
 
-    # Agentic loop
-    for _ in range(3):
+    for _ in range(2):
         if resp.stop_reason != "tool_use":
             break
-
         tool_results = []
         for block in resp.content:
             if block.type != "tool_use":
                 continue
             sql = block.input.get("query", "").strip()
             sql_upper = sql.upper()
-            # Whitelist: solo SELECT puro, blocco qualsiasi keyword di scrittura
-            _FORBIDDEN = ['INSERT','UPDATE','DELETE','DROP','CREATE','ALTER',
-                          'ATTACH','DETACH','REPLACE','TRUNCATE','VACUUM',
-                          'REINDEX','ANALYZE']
-            _has_forbidden = any(
-                re.search(rf'\b{kw}\b', sql_upper) for kw in _FORBIDDEN
-            )
-            if not sql_upper.lstrip().startswith("SELECT") or _has_forbidden:
-                result_str = "Operazione non consentita: solo query SELECT di sola lettura."
+            if not sql_upper.lstrip().startswith("SELECT") or any(
+                    re.search(rf'\b{kw}\b', sql_upper) for kw in _FORBIDDEN):
+                result_str = "Operazione non consentita: solo query SELECT."
             else:
                 try:
-                    # Connessione in sola lettura — impossibile scrivere anche con bug
                     conn = sqlite3.connect(f"file:{MARMI_DB}?mode=ro", uri=True)
                     conn.row_factory = sqlite3.Row
-                    rows = conn.execute(sql).fetchall()
+                    db_rows = conn.execute(sql).fetchall()
                     conn.close()
-                    data = [dict(r) for r in rows[:50]]
-                    result_str = json.dumps(data, ensure_ascii=False, default=str)
+                    result_str = json.dumps(
+                        [dict(r) for r in db_rows[:50]], ensure_ascii=False, default=str
+                    )
                 except Exception as e:
                     result_str = f"Errore SQL: {str(e)}"
             tool_results.append({
@@ -836,7 +875,6 @@ def ai_natural_query(question, history=None):
                 "tool_use_id": block.id,
                 "content": result_str
             })
-
         msgs = msgs + [
             {"role": "assistant", "content": resp.content},
             {"role": "user",      "content": tool_results}
@@ -851,10 +889,7 @@ def ai_natural_query(question, history=None):
 
     text_parts = [b.text for b in resp.content if hasattr(b, "text") and b.text]
     answer = "\n".join(text_parts).strip()
-    if not answer:
-        rows, title = natural_query(question)
-        answer = format_answer(rows, title, question)
-    return answer
+    return answer if answer else format_answer([], title, question)
 
 def ai_stream_tokens(question, history=None):
     """
@@ -1722,56 +1757,22 @@ async function send(){
   inp.value=''; inp.style.height='auto';
   const es=document.getElementById('empty-state'); if(es) es.remove();
   addMsg('user',q);
+  const typing=addTyping();
   document.getElementById('messages').scrollTop=99999;
-
-  // Crea bolla bot vuota (streaming riempirà il testo)
-  const msgs=document.getElementById('messages');
-  const wrap=document.createElement('div'); wrap.className='msg-wrap bot';
-  const av=document.createElement('div'); av.className='av'; av.textContent='A';
-  const bub=document.createElement('div'); bub.className='bubble';
-  bub.innerHTML='<div class="dots"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div>';
-  wrap.appendChild(av); wrap.appendChild(bub); msgs.appendChild(wrap);
-
-  let rawText='';
-  let firstToken=true;
-
   try{
-    const cidParam=activeCid?'&cid='+activeCid:'';
-    const url='/api/ask_stream?q='+encodeURIComponent(q)+cidParam;
-    const resp=await fetch(url);
-    if(!resp.ok){bub.textContent='Errore di connessione. Riprova.';return;}
-    const reader=resp.body.getReader();
-    const dec=new TextDecoder();
-    let buf='';
-    while(true){
-      const {done,value}=await reader.read();
-      if(done) break;
-      buf+=dec.decode(value,{stream:true});
-      const parts=buf.split('\n\n');
-      buf=parts.pop();
-      for(const part of parts){
-        if(!part.startsWith('data:')) continue;
-        let obj;
-        try{obj=JSON.parse(part.slice(5).trim());}catch(e){continue;}
-        if(obj.error){bub.textContent='Errore: '+obj.error;return;}
-        if(obj.token){
-          rawText+=obj.token;
-          if(firstToken){bub.innerHTML='';firstToken=false;}
-          bub.innerHTML=md(rawText);
-          msgs.scrollTop=99999;
-        }
-        if(obj.done){
-          activeCid=obj.cid;
-          const idx=convs.findIndex(c=>c.id===obj.cid);
-          if(idx>=0){convs[idx].title=obj.title;convs[idx].updated_at=new Date().toISOString();}
-          else convs.unshift({id:obj.cid,title:obj.title,updated_at:new Date().toISOString()});
-          document.getElementById('chat-top-title').textContent=obj.title;
-          renderSidebar();
-        }
-      }
-    }
-  }catch(e){bub.textContent='Errore di connessione. Riprova.';}
-  msgs.scrollTop=99999;
+    const r=await fetch('/api/ask',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({q,conversation_id:activeCid})});
+    const d=await r.json();
+    typing.remove();
+    if(d.error){addMsg('bot','Errore: '+d.error);return;}
+    addMsg('bot',d.answer);
+    activeCid=d.conversation_id;
+    const idx=convs.findIndex(c=>c.id===d.conversation_id);
+    if(idx>=0){convs[idx].title=d.title;convs[idx].updated_at=new Date().toISOString();}
+    else convs.unshift({id:d.conversation_id,title:d.title,updated_at:new Date().toISOString()});
+    document.getElementById('chat-top-title').textContent=d.title;
+    renderSidebar();
+  }catch(e){typing.remove();addMsg('bot','Errore di connessione. Riprova.');}
+  document.getElementById('messages').scrollTop=99999;
 }
 
 function addMsg(role,content){
